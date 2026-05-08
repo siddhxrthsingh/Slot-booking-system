@@ -168,8 +168,8 @@ pesu_sports_slot_booking_system/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/pesu_sports_slot_booking_system.git
-cd pesu_sports_slot_booking_system
+git clone https://github.com/siddhxrthsingh/Slot-booking-system.git
+cd Slot-booking-system
 ```
 
 ### 2. Backend Setup
