@@ -327,5 +327,5 @@ This project is for academic purposes at PES University. All rights reserved.
 ---
 
 <div align="center">
-  Built with ❤️ for PESU by students, for students.
+  Built with <3
 </div>
