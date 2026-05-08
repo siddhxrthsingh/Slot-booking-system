@@ -17,18 +17,22 @@ Book slots for 8 sports across RR and EC campuses — with real-time updates, ad
 
 ---
 
-## Demo
+## Screenshots
 
-> **Video demo coming soon.**  
-> In the meantime, here's a walkthrough of the main screens:
+**Login Page**  
+![Login Page](docs/screenshots/login.png)
 
-| Login Page | Student Dashboard |
-|:---:|:---:|
-| ![Login](frontend/frontend/public/images/pesu-campus.jpg) | ![Dashboard](frontend/frontend/public/images/football-hero.jpg) |
+**Student Dashboard**  
+![Student Dashboard](docs/screenshots/dashboard.png)
 
-| Book a Slot | Admin Panel |
-|:---:|:---:|
-| ![Booking](frontend/frontend/public/images/basketball.jpg) | ![Admin](frontend/frontend/public/images/cricket.jpg) |
+**Book a Slot**  
+![Book a Slot](docs/screenshots/book-slot.png)
+
+**Admin Panel — Overview**  
+![Admin Panel Overview](docs/screenshots/admin-panel.png)
+
+**Admin Panel — Live Metrics & Create Slot**  
+![Admin Panel Metrics](docs/screenshots/admin-overview.png)
 
 ---
 
