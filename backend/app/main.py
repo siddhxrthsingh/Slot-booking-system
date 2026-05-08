@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.database import close_db, connect_db
 from app.routers import admin, auth, bookings
 from app.utils import error_response
+from app.ws_manager import manager as ws_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,3 +93,19 @@ app.include_router(admin.router)
 @app.get("/health", tags=["Health"])
 async def health():
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — real-time dashboard updates
+# ---------------------------------------------------------------------------
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            # Keep the connection alive; we only push from server to client.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)

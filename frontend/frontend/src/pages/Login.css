@@ -1,0 +1,175 @@
+/* ── PESU Login Page ───────────────────────────────────────────────────────── */
+
+.pesu-login-page {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: url('/images/football.jpg') center / cover no-repeat;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.pesu-bg-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(240, 244, 255, 0.72);
+  backdrop-filter: blur(2px);
+  z-index: 0;
+}
+
+.pesu-logo-corner {
+  position: fixed;
+  top: 22px;
+  left: 28px;
+  z-index: 2;
+}
+
+.pesu-logo-img {
+  height: 64px;
+  width: auto;
+  object-fit: contain;
+}
+
+.pesu-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 420px;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 12px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.07), 0 20px 48px rgba(0,0,0,0.14);
+  padding: 44px 40px 36px;
+}
+
+.pesu-title {
+  margin: 0 0 28px;
+  font-size: 2rem;
+  font-weight: 400;
+  color: #1a1a2e;
+  letter-spacing: -0.3px;
+}
+
+.pesu-field {
+  margin-bottom: 16px;
+}
+
+.pesu-password-wrap {
+  position: relative;
+}
+
+.pesu-input {
+  width: 100%;
+  padding: 13px 16px;
+  border: 1px solid #cdd4e0;
+  border-radius: 8px;
+  font-size: 0.97rem;
+  color: #1a1a2e;
+  background: #fff;
+  outline: none;
+  transition: border-color 0.18s, box-shadow 0.18s;
+  box-sizing: border-box;
+}
+
+.pesu-input:focus {
+  border-color: #1a2f5e;
+  box-shadow: 0 0 0 3px rgba(26, 47, 94, 0.12);
+}
+
+/* Hide the browser's built-in password reveal button (Edge / Chrome) */
+.pesu-input[type="password"]::-ms-reveal,
+.pesu-input[type="password"]::-ms-clear,
+.pesu-input::-webkit-credentials-auto-fill-button,
+.pesu-input::-webkit-contacts-auto-fill-button {
+  display: none !important;
+}
+
+.pesu-input-error { border-color: #dc2626; }
+.pesu-input-error:focus { box-shadow: 0 0 0 3px rgba(220,38,38,0.12); }
+
+.pesu-eye-btn {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+.pesu-eye-btn:hover { color: #1a2f5e; }
+.pesu-password-wrap .pesu-input { padding-right: 44px; }
+
+.pesu-error-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 14px;
+  padding: 10px 14px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #dc2626;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.pesu-signin-btn {
+  width: 100%;
+  padding: 14px;
+  margin-top: 4px;
+  background: #1a2f5e;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: background 0.18s, transform 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50px;
+}
+.pesu-signin-btn:hover:not(:disabled) { background: #243d78; }
+.pesu-signin-btn:active:not(:disabled) { transform: scale(0.99); }
+.pesu-signin-btn:disabled { opacity: 0.7; cursor: not-allowed; }
+
+.pesu-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2.5px solid rgba(255,255,255,0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: pesu-spin 0.7s linear infinite;
+}
+@keyframes pesu-spin { to { transform: rotate(360deg); } }
+
+.pesu-hint {
+  margin: 20px 0 0;
+  font-size: 0.82rem;
+  color: #6b7280;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.pesu-footer {
+  position: relative;
+  z-index: 1;
+  margin-top: 24px;
+  font-size: 0.78rem;
+  color: #4b5563;
+  opacity: 0.85;
+}
+
+@media (max-width: 500px) {
+  .pesu-card { padding: 36px 24px 28px; }
+  .pesu-logo-img { height: 48px; }
+}

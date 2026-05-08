@@ -1,5 +1,5 @@
 """
-Auth service: PESUAuth integration, JWT generation, session management.
+Auth service: PESUAuth integration, admin login, JWT generation, session management.
 """
 import hashlib
 import secrets
@@ -13,6 +13,57 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import get_settings
 
 settings = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Admin (employee-ID) login — no external API required
+# ---------------------------------------------------------------------------
+
+def is_admin_employee_id(username: str) -> bool:
+    """True when the username matches the configured admin employee ID."""
+    return username.upper() == settings.admin_employee_id.upper()
+
+
+async def verify_admin_credentials(username: str, password: str) -> dict | None:
+    """
+    Authenticate with local admin credentials (no PESUAuth call).
+    Returns a profile dict on success, None on wrong password.
+    """
+    if not is_admin_employee_id(username):
+        return None
+    if password != settings.admin_password:
+        return None
+    return {
+        "employee_id": settings.admin_employee_id.upper(),
+        "name":        settings.admin_name,
+        "email":       settings.admin_email,
+        "role":        "admin",
+    }
+
+
+async def upsert_admin(db: AsyncIOMotorDatabase, profile: dict) -> dict:
+    """Create or refresh the admin user document."""
+    now = datetime.now(timezone.utc)
+    eid = profile["employee_id"]
+
+    result = await db["users"].find_one_and_update(
+        {"srn": eid},
+        {
+            "$set": {
+                "email":      profile.get("email", ""),
+                "name":       profile.get("name", ""),
+                "role":       "admin",
+                "last_login": now,
+            },
+            "$setOnInsert": {
+                "srn":        eid,
+                "created_at": now,
+            },
+        },
+        upsert=True,
+        return_document=True,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -42,48 +93,78 @@ def _hash_token(token: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# PESUAuth integration
+# PESUAuth integration  (https://github.com/pesu-dev/auth)
+# Live endpoint: https://pesu-auth.onrender.com/authenticate
 # ---------------------------------------------------------------------------
+
+# campus_code returned by PESUAuth: 1 = RR, 2 = EC
+_CAMPUS_CODE_MAP = {1: "RR", 2: "EC"}
+
 
 async def verify_pesu_credentials(username: str, password: str) -> dict | None:
     """
-    Call the PESUAuth API to validate student credentials.
-    Returns a profile dict on success, None on failure.
+    Call the live PESUAuth API to validate PESU Academy credentials.
+    Returns a normalised profile dict on success, None on wrong credentials.
+    Raises httpx.RequestError on network failure (router converts to 503).
 
-    If PESU_AUTH_URL is not reachable (e.g., local dev), this function
-    raises an exception which the router handles.
+    Accepts: SRN, PRN, email address, or registered phone number.
     """
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        # Render free-tier can cold-start — use a generous timeout.
+        async with httpx.AsyncClient(timeout=35) as client:
             response = await client.post(
                 settings.pesu_auth_url,
-                json={"username": username, "password": password},
+                json={"username": username, "password": password, "profile": True},
             )
-        if response.status_code != 200:
+
+        # 401 = wrong credentials — return None so router sends 401 to browser.
+        if response.status_code == 401:
             return None
+
+        if response.status_code != 200:
+            raise httpx.RequestError(
+                f"PESUAuth returned unexpected status {response.status_code}"
+            )
+
         data = response.json()
-        # PESUAuth is expected to return a profile on success
-        return data if data.get("status") else None
+        if not data.get("status"):
+            return None
+
+        raw = data.get("profile") or {}
+
+        # campus field is "RR"/"EC" string; fall back to campus_code int if missing.
+        campus = raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
+
+        return {
+            "srn":      raw.get("srn") or raw.get("prn") or username.upper(),
+            "name":     raw.get("name", ""),
+            "email":    raw.get("email", ""),
+            "program":  raw.get("program"),
+            "branch":   raw.get("branch"),
+            "campus":   campus,
+            "semester": raw.get("semester"),
+            "section":  raw.get("section"),
+        }
+
     except httpx.RequestError:
-        # In development mode allow a mock bypass
+        # Dev-only bypass: lets you test locally without hitting the real API.
+        # Disabled automatically when APP_ENV=production.
         if settings.app_env == "development":
             return _mock_pesu_profile(username)
         raise
 
 
 def _mock_pesu_profile(username: str) -> dict:
-    """
-    Mock profile returned in development when PESUAuth API is unavailable.
-    Remove or gate this in production.
-    """
+    """Development-only mock. Never active when APP_ENV=production."""
     return {
-        "status": True,
-        "srn": username.upper(),
-        "email": f"{username.lower()}@pesu.ac.in",
-        "name": "Dev User",
-        "program": "B.Tech",
-        "branch": "CSE",
-        "campus": "RR",
+        "srn":      username.upper(),
+        "email":    f"{username.lower()}@pesu.pes.edu",
+        "name":     "Dev User (mock)",
+        "program":  "Bachelor of Technology",
+        "branch":   "Computer Science and Engineering",
+        "campus":   "RR",
+        "semester": "6",
+        "section":  "A",
     }
 
 
@@ -92,29 +173,33 @@ def _mock_pesu_profile(username: str) -> dict:
 # ---------------------------------------------------------------------------
 
 async def upsert_user(db: AsyncIOMotorDatabase, profile: dict) -> dict:
-    """Create a new user or update last_login for an existing one."""
+    """Create a new user record or refresh last_login for a returning user."""
     now = datetime.now(timezone.utc)
-    srn = profile["srn"].upper()
+    srn = (profile.get("srn") or "").upper()
+    if not srn:
+        raise ValueError("PESUAuth did not return an SRN for this user.")
 
     result = await db["users"].find_one_and_update(
         {"srn": srn},
         {
             "$set": {
-                "email": profile.get("email", ""),
-                "name": profile.get("name", ""),
-                "program": profile.get("program"),
-                "branch": profile.get("branch"),
-                "campus": profile.get("campus"),
+                "email":      profile.get("email", ""),
+                "name":       profile.get("name", ""),
+                "program":    profile.get("program"),
+                "branch":     profile.get("branch"),
+                "campus":     profile.get("campus"),
+                "semester":   profile.get("semester"),
+                "section":    profile.get("section"),
                 "last_login": now,
             },
             "$setOnInsert": {
-                "srn": srn,
-                "role": "student",
+                "srn":        srn,
+                "role":       "student",
                 "created_at": now,
             },
         },
         upsert=True,
-        return_document=True,  # return the updated/inserted document
+        return_document=True,
     )
     return result
 

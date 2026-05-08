@@ -37,6 +37,22 @@ select {
   font: inherit;
 }
 
+/* ── Make date/time picker icons white on dark backgrounds ── */
+/*
+  Do NOT set color-scheme:dark on the input — that makes the browser
+  draw the indicator icon in a light colour, and then invert(1) would
+  flip it dark again.  Instead we leave the indicator as its default
+  dark colour and invert it ourselves to get a white icon.
+*/
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(2) !important;
+  cursor: pointer;
+  opacity: 1 !important;
+  padding: 0 2px;
+}
+
 #root {
   min-height: 100vh;
 }

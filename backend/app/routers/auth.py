@@ -22,25 +22,32 @@ async def login(
     request: Request,
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    # 1. Verify credentials against PESUAuth
-    try:
-        profile = await auth_service.verify_pesu_credentials(body.username, body.password)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication service unavailable",
-        )
+    # 1a. Check if this is an admin employee-ID login (no external API)
+    admin_profile = await auth_service.verify_admin_credentials(body.username, body.password)
+    if admin_profile:
+        user_doc = await auth_service.upsert_admin(db, admin_profile)
+        user_id = str(user_doc["_id"])
+        role = "admin"
+    else:
+        # 1b. Verify student credentials against PESUAuth
+        try:
+            profile = await auth_service.verify_pesu_credentials(body.username, body.password)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service unavailable",
+            )
 
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-        )
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+            )
 
-    # 2. Upsert user in MongoDB
-    user_doc = await auth_service.upsert_user(db, profile)
-    user_id = str(user_doc["_id"])
-    role = user_doc.get("role", "student")
+        # 2. Upsert user in MongoDB
+        user_doc = await auth_service.upsert_user(db, profile)
+        user_id = str(user_doc["_id"])
+        role = user_doc.get("role", "student")
 
     # 3. Generate tokens
     access_token = auth_service.create_access_token(user_id, role)
