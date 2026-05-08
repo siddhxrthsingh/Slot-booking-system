@@ -264,6 +264,8 @@ Vite automatically proxies `/api` → `http://localhost:8000` and `/ws` → `ws:
 
 ## Default Credentials
 
+> **Note:** These are default development credentials. Change `ADMIN_EMPLOYEE_ID` and `ADMIN_PASSWORD` in your `.env` before any public deployment.
+
 | Role | Field | Value |
 |------|-------|-------|
 | Admin | Employee ID | `EMP001` |
