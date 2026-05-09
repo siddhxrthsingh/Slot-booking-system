@@ -322,10 +322,6 @@ Vite automatically proxies `/api` → `http://localhost:8000` and `/ws` → `ws:
 
 ---
 
-## License
-
-This project is for academic purposes at PES University. All rights reserved.
-
 ---
 
 <div align="center">
