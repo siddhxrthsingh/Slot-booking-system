@@ -39,7 +39,7 @@ Book slots for 8 sports across RR and EC campuses — with real-time updates, ad
 ## Features
 
 ### Student Portal
-- **PESUAuth Login** — sign in with SRN, PRN, email, or phone number via the official PESU authentication API
+- **PESUAuth Login** — sign in with SRN, PRN, email, or phone number via the PESU authentication API
 - **Sport Cards** — browse available slots for all 8 sports with live seat counts
 - **Campus & Sport Filters** — quickly find slots by RR or EC campus
 - **Book a Slot** — instant confirmation with conflict detection (no double-booking, no time clashes)
@@ -72,11 +72,6 @@ Book slots for 8 sports across RR and EC campuses — with real-time updates, ad
 - Tokens stored in `sessionStorage` — cleared automatically on tab close
 - Axios interceptor queues concurrent requests and auto-refreshes on 401
 - Rate limiting on login endpoint via `slowapi`
-
-### Email Notifications (optional)
-- Booking confirmation email
-- Cancellation email with ban warning if late cancel
-- Silently skipped if SMTP is not configured
 
 ---
 
