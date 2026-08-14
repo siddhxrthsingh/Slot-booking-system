@@ -24,10 +24,13 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 async def get_slots(
     campus: Literal["RR", "EC"] | None = Query(default=None),
     sport: str | None = Query(default=None),
+    include_inactive: bool = Query(default=False),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    slots = await admin_service.list_all_slots(db, campus, sport)
+    slots = await admin_service.list_all_slots(
+        db, campus, sport, active_only=not include_inactive
+    )
     result = [
         {
             "id":                str(s["_id"]),

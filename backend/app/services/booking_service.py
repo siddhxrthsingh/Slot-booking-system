@@ -91,7 +91,8 @@ async def list_available_slots(
         query["date"] = {"$gte": start, "$lte": end}
 
     slots = await db["slots"].find(query).sort("date", 1).to_list(length=200)
-    return slots
+    now = datetime.now(timezone.utc)
+    return [s for s in slots if _slot_end_dt(s) >= now]
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,17 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.services.booking_service import _slot_end_dt
+
+
+def _filter_active_slots(slots: list[dict], now: datetime | None = None) -> list[dict]:
+    """Keep open/full slots whose end time has not passed."""
+    now = now or datetime.now(timezone.utc)
+    return [
+        s for s in slots
+        if s.get("status") in ("open", "full") and _slot_end_dt(s) >= now
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Slot management
@@ -15,14 +26,19 @@ async def list_all_slots(
     db: AsyncIOMotorDatabase,
     campus: str | None = None,
     sport: str | None = None,
+    active_only: bool = True,
 ) -> list[dict]:
     query: dict = {}
+    if active_only:
+        query["status"] = {"$in": ["open", "full"]}
     if campus:
         query["campus"] = campus
     if sport:
         query["sport"] = {"$regex": sport, "$options": "i"}
 
-    slots = await db["slots"].find(query).sort("date", -1).to_list(length=500)
+    slots = await db["slots"].find(query).sort("date", 1).to_list(length=500)
+    if active_only:
+        slots = _filter_active_slots(slots)
     return slots
 
 
@@ -148,8 +164,14 @@ async def process_approval(
 
 async def get_metrics(db: AsyncIOMotorDatabase) -> dict:
     total_slots = await db["slots"].count_documents({})
-    open_slots = await db["slots"].count_documents({"status": "open"})
-    full_slots = await db["slots"].count_documents({"status": "full"})
+    open_full_slots = (
+        await db["slots"]
+        .find({"status": {"$in": ["open", "full"]}})
+        .to_list(length=500)
+    )
+    active_slots = _filter_active_slots(open_full_slots)
+    open_slots = sum(1 for s in active_slots if s["status"] == "open")
+    full_slots = sum(1 for s in active_slots if s["status"] == "full")
     cancelled_slots = await db["slots"].count_documents({"status": "cancelled"})
     total_bookings = await db["bookings"].count_documents({})
     confirmed_bookings = await db["bookings"].count_documents({"status": "confirmed"})
@@ -157,27 +179,18 @@ async def get_metrics(db: AsyncIOMotorDatabase) -> dict:
     cancelled_bookings = await db["bookings"].count_documents({"status": "cancelled"})
     total_users = await db["users"].count_documents({})
 
-    # Overall occupancy rate across open+full slots
-    pipeline = [
-        {"$match": {"status": {"$in": ["open", "full"]}}},
-        {
-            "$group": {
-                "_id": None,
-                "total_capacity": {"$sum": "$capacity"},
-                "total_booked": {"$sum": "$booked_count"},
-            }
-        },
-    ]
-    agg = await db["slots"].aggregate(pipeline).to_list(length=1)
+    total_capacity = sum(s["capacity"] for s in active_slots)
+    total_booked = sum(s["booked_count"] for s in active_slots)
     occupancy_pct = 0.0
-    if agg and agg[0]["total_capacity"] > 0:
-        occupancy_pct = round(agg[0]["total_booked"] / agg[0]["total_capacity"] * 100, 1)
+    if total_capacity > 0:
+        occupancy_pct = round(total_booked / total_capacity * 100, 1)
 
     return {
         "slots": {
             "total": total_slots,
             "open": open_slots,
             "full": full_slots,
+            "active": len(active_slots),
             "cancelled": cancelled_slots,
         },
         "bookings": {

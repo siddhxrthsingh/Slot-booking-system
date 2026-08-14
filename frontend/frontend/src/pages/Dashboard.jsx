@@ -385,7 +385,7 @@ export default function Dashboard() {
 
   const metricCards = metrics
     ? [
-        { label: 'Active slots',       value: metrics.slots.open + metrics.slots.full },
+        { label: 'Active slots',       value: metrics.slots.active ?? (metrics.slots.open + metrics.slots.full) },
         { label: 'Occupancy',          value: `${metrics.occupancy_pct}%` },
         { label: 'Total bookings',     value: metrics.bookings.total },
         { label: 'Confirmed bookings', value: metrics.bookings.confirmed },
@@ -538,7 +538,11 @@ export default function Dashboard() {
             ) : (
               <div className="sports-grid">
                 {displayedSports.map((sportName) => {
-                  const sportSlots  = slotsBySport[sportName] || [];
+                  const sportSlots  = (slotsBySport[sportName] || []).slice().sort((a, b) => {
+                    const dateCmp = new Date(a.date) - new Date(b.date);
+                    if (dateCmp !== 0) return dateCmp;
+                    return a.start_time.localeCompare(b.start_time);
+                  });
                   const totalAvail  = sportSlots.reduce((s, sl) => s + sl.available_count, 0);
                   const meta        = SPORT_META[sportName] || { image: '', accent: '' };
                   const nextSlot    = sportSlots[0];

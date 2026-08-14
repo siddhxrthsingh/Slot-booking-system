@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class SlotCreate(BaseModel):
@@ -23,6 +23,12 @@ class SlotCreate(BaseModel):
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError("Invalid time value")
         return v
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> "SlotCreate":
+        if self.end_time <= self.start_time:
+            raise ValueError("End time must be after start time")
+        return self
 
 
 class SlotResponse(BaseModel):
