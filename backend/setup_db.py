@@ -24,6 +24,15 @@ async def main():
     await db["facilities"].create_index([("campus", 1), ("sport", 1), ("name", 1)])
     print("  facilities indexes")
 
+    # Schedule templates
+    await db["schedule_templates"].create_index(
+        [("campus", 1), ("sport", 1), ("day_type", 1), ("is_active", 1)]
+    )
+    await db["schedule_templates"].create_index(
+        [("facility_id", 1), ("day_type", 1), ("is_active", 1)]
+    )
+    print("  schedule templates indexes")
+
     # Slots
     await db["slots"].create_index([("sport", 1), ("date", 1)])
     await db["slots"].create_index([("campus", 1), ("status", 1)])
