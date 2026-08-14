@@ -41,6 +41,21 @@ async def main():
     await db["slots"].create_index([("facility_id", 1), ("date", 1), ("start_time", 1)])
     await db["slots"].create_index([("campus", 1), ("sport", 1), ("date", 1)])
     await db["slots"].create_index([("campus", 1), ("status", 1), ("date", 1)])
+    await db["slots"].create_index(
+        [
+            ("campus", 1),
+            ("facility_id", 1),
+            ("date", 1),
+            ("start_time", 1),
+            ("end_time", 1),
+            ("slot_type", 1),
+        ],
+        unique=True,
+        partialFilterExpression={
+            "slot_type": "generated",
+            "facility_id": {"$type": "objectId"},
+        },
+    )
     print("  ✓ slots indexes")
 
     # Bookings
