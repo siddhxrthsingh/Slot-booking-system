@@ -19,16 +19,26 @@ async def main():
     await db["users"].create_index("email")
     print("  ✓ users indexes")
 
+    # Facilities
+    await db["facilities"].create_index([("campus", 1), ("sport", 1), ("sort_order", 1)])
+    await db["facilities"].create_index([("campus", 1), ("sport", 1), ("name", 1)])
+    print("  facilities indexes")
+
     # Slots
     await db["slots"].create_index([("sport", 1), ("date", 1)])
     await db["slots"].create_index([("campus", 1), ("status", 1)])
     await db["slots"].create_index("date")
+    await db["slots"].create_index([("facility_id", 1), ("date", 1)])
+    await db["slots"].create_index([("facility_id", 1), ("date", 1), ("start_time", 1)])
+    await db["slots"].create_index([("campus", 1), ("sport", 1), ("date", 1)])
+    await db["slots"].create_index([("campus", 1), ("status", 1), ("date", 1)])
     print("  ✓ slots indexes")
 
     # Bookings
     await db["bookings"].create_index([("user_id", 1), ("status", 1)])
     await db["bookings"].create_index([("slot_id", 1), ("status", 1)])
     await db["bookings"].create_index("status")
+    await db["bookings"].create_index([("facility_id", 1), ("status", 1)])
     print("  ✓ bookings indexes")
 
     # Sessions

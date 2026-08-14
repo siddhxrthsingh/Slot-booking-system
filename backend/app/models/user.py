@@ -19,13 +19,19 @@ class PyObjectId(str):
 class UserModel(BaseModel):
     id: PyObjectId | None = Field(default=None, alias="_id")
     srn: str
+    prn: str | None = None
     email: str
+    phone: str | None = None
     name: str
     program: str | None = None
     branch: str | None = None
+    semester: str | None = None
+    section: str | None = None
     campus: Literal["RR", "EC"] | None = None
     role: Literal["student", "admin"] = "student"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    auth_provider: Literal["pesuauth", "admin"] | None = None
     last_login: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime | None = None
 
     model_config = {"populate_by_name": True, "arbitrary_types_allowed": True}
