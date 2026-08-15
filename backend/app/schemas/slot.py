@@ -46,6 +46,7 @@ class SlotResponse(BaseModel):
     booked_count: int
     available_count: int
     status: str
+    leader_user_id: str | None = None
     slot_type: str | None = None
     is_manual: bool = False
     requires_approval: bool
