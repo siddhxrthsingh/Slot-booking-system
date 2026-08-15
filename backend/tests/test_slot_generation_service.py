@@ -143,6 +143,10 @@ class FakeDb:
 
 def matches(doc, query):
     for key, expected in query.items():
+        if key == "$or":
+            if not any(matches(doc, clause) for clause in expected):
+                return False
+            continue
         actual = doc.get(key)
         if isinstance(expected, dict):
             if "$in" in expected and actual not in expected["$in"]:
@@ -263,6 +267,26 @@ class SlotGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(existing["status"], "full")
         self.assertEqual(existing["leader_user_id"], "user-1")
 
+    async def test_existing_full_generated_slot_remains_full(self):
+        existing = {
+            "campus": "RR",
+            "facility_id": "badminton-1",
+            "date": datetime(2026, 8, 17),
+            "start_time": "10:00",
+            "end_time": "11:00",
+            "slot_type": "generated",
+            "sport": "Badminton",
+            "booked_count": 6,
+            "status": "full",
+            "leader_user_id": "user-2",
+        }
+        db = default_db([existing])
+        await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertEqual(existing["booked_count"], 6)
+        self.assertEqual(existing["status"], "full")
+        self.assertEqual(existing["leader_user_id"], "user-2")
+
     async def test_existing_manual_slot_is_not_modified_and_overlap_is_reported(self):
         manual = {
             "_id": "manual-1",
@@ -281,6 +305,70 @@ class SlotGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(manual, db["slots"].docs)
         self.assertEqual(manual["notes"], "Manual slot")
         self.assertGreaterEqual(len(result["manual_overlaps"]), 1)
+
+    async def test_manual_slot_with_manual_type_is_not_modified_or_deleted(self):
+        manual = {
+            "_id": "manual-typed",
+            "campus": "RR",
+            "facility_id": "badminton-1",
+            "date": datetime(2026, 8, 17),
+            "start_time": "11:00",
+            "end_time": "12:00",
+            "slot_type": "manual",
+            "is_manual": False,
+            "notes": "Manual by type",
+        }
+        db = default_db([manual])
+        result = await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertIn(manual, db["slots"].docs)
+        self.assertEqual(manual["notes"], "Manual by type")
+        self.assertTrue(any(overlap["slot_id"] == "manual-typed" for overlap in result["manual_overlaps"]))
+
+    async def test_exact_manual_generated_overlap_is_reported(self):
+        manual = {
+            "_id": "manual-exact",
+            "campus": "RR",
+            "facility_id": "badminton-1",
+            "date": datetime(2026, 8, 17),
+            "start_time": "09:00",
+            "end_time": "10:00",
+            "slot_type": "manual",
+        }
+        db = default_db([manual])
+        result = await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertTrue(any(overlap["slot_id"] == "manual-exact" for overlap in result["manual_overlaps"]))
+
+    async def test_partial_manual_generated_overlap_is_reported(self):
+        manual = {
+            "_id": "manual-partial",
+            "campus": "RR",
+            "facility_id": "badminton-1",
+            "date": datetime(2026, 8, 17),
+            "start_time": "09:30",
+            "end_time": "11:00",
+            "is_manual": True,
+        }
+        db = default_db([manual])
+        result = await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertTrue(any(overlap["slot_id"] == "manual-partial" for overlap in result["manual_overlaps"]))
+
+    async def test_non_overlapping_manual_slot_is_not_reported(self):
+        manual = {
+            "_id": "manual-late",
+            "campus": "RR",
+            "facility_id": "badminton-1",
+            "date": datetime(2026, 8, 17),
+            "start_time": "20:00",
+            "end_time": "21:00",
+            "is_manual": True,
+        }
+        db = default_db([manual])
+        result = await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertFalse(any(overlap["slot_id"] == "manual-late" for overlap in result["manual_overlaps"]))
 
     async def test_no_cleaning_lunch_or_staff_slots_are_created(self):
         db = default_db()

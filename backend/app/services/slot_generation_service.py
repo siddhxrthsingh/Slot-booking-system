@@ -113,7 +113,10 @@ async def _find_manual_overlaps(
             "campus": facility["campus"],
             "facility_id": facility["_id"],
             "date": slot_date,
-            "is_manual": True,
+            "$or": [
+                {"slot_type": "manual"},
+                {"is_manual": True},
+            ],
         }
     ).to_list(length=100)
 
