@@ -23,23 +23,7 @@ async def list_available_slots(
     db:     AsyncIOMotorDatabase = Depends(get_db),
 ):
     slots = await booking_service.list_available_slots(db, sport, date, campus, venue)
-    result = [
-        {
-            "id":                str(s["_id"]),
-            "sport":             s["sport"],
-            "date":              s["date"],
-            "start_time":        s["start_time"],
-            "end_time":          s["end_time"],
-            "venue":             s["venue"],
-            "campus":            s["campus"],
-            "capacity":          s["capacity"],
-            "booked_count":      s["booked_count"],
-            "available_count":   s["capacity"] - s["booked_count"],
-            "status":            s["status"],
-            "requires_approval": s.get("requires_approval", False),
-        }
-        for s in slots
-    ]
+    result = [booking_service.serialize_student_slot(s) for s in slots]
     return success_response(data=result, message="Available slots fetched")
 
 

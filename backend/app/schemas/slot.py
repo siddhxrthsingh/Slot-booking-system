@@ -33,16 +33,21 @@ class SlotCreate(BaseModel):
 
 class SlotResponse(BaseModel):
     id: str
+    facility_id: str | None = None
+    facility_name: str | None = None
     sport: str
     date: datetime
     start_time: str
     end_time: str
     venue: str
     campus: str
+    duration_minutes: int | None = None
     capacity: int
     booked_count: int
     available_count: int
     status: str
+    slot_type: str | None = None
+    is_manual: bool = False
     requires_approval: bool
 
 

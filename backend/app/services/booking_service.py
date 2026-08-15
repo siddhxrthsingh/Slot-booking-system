@@ -71,6 +71,32 @@ async def apply_ban(db: AsyncIOMotorDatabase, user_oid: ObjectId, reason: str) -
 # Availability
 # ---------------------------------------------------------------------------
 
+def serialize_student_slot(slot: dict) -> dict:
+    facility_id = slot.get("facility_id")
+    facility_name = slot.get("facility_name")
+    capacity = slot.get("capacity", 0)
+    booked_count = slot.get("booked_count", 0)
+    return {
+        "id": str(slot["_id"]),
+        "facility_id": str(facility_id) if facility_id else None,
+        "facility_name": facility_name,
+        "sport": slot["sport"],
+        "date": slot["date"],
+        "start_time": slot["start_time"],
+        "end_time": slot["end_time"],
+        "venue": slot.get("venue") or facility_name or "",
+        "campus": slot["campus"],
+        "duration_minutes": slot.get("duration_minutes"),
+        "capacity": capacity,
+        "booked_count": booked_count,
+        "available_count": max(capacity - booked_count, 0),
+        "status": slot["status"],
+        "slot_type": slot.get("slot_type"),
+        "is_manual": slot.get("is_manual", False),
+        "requires_approval": slot.get("requires_approval", False),
+    }
+
+
 async def list_available_slots(
     db: AsyncIOMotorDatabase,
     sport: str | None = None,
@@ -78,19 +104,24 @@ async def list_available_slots(
     campus: str | None = None,
     venue: str | None = None,
 ) -> list[dict]:
-    query: dict = {"status": "open"}
+    query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
         query["sport"] = {"$regex": sport, "$options": "i"}
     if campus:
         query["campus"] = campus
     if venue:
-        query["venue"] = {"$regex": venue, "$options": "i"}
+        query["$or"] = [
+            {"venue": {"$regex": venue, "$options": "i"}},
+            {"facility_name": {"$regex": venue, "$options": "i"}},
+        ]
     if date:
         start = date.replace(hour=0, minute=0, second=0, microsecond=0)
         end   = date.replace(hour=23, minute=59, second=59, microsecond=999999)
         query["date"] = {"$gte": start, "$lte": end}
 
-    slots = await db["slots"].find(query).sort("date", 1).to_list(length=200)
+    slots = await db["slots"].find(query).sort(
+        [("date", 1), ("sport", 1), ("start_time", 1), ("facility_name", 1)]
+    ).to_list(length=500)
     now = datetime.now(timezone.utc)
     return [s for s in slots if _slot_end_dt(s) >= now]
 
