@@ -130,6 +130,16 @@ async def cancel_slot(
         "slot_id":           slot_id,
         "bookings_cancelled": affected,
     })
+
+    slot = await db["slots"].find_one({"_id": ObjectId(slot_id)})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
+
     return success_response(
         data={"slot_id": slot_id, "bookings_cancelled": affected},
         message="Slot cancelled and all associated bookings cancelled",
@@ -195,6 +205,16 @@ async def admin_cancel_booking(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     await ws_manager.broadcast("booking_cancelled", {"booking_id": booking_id, "sport": updated["sport"]})
+
+    slot = await db["slots"].find_one({"_id": updated["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
+
     return success_response(
         data={"booking_id": booking_id, "status": updated["status"]},
         message="Booking cancelled by admin",
