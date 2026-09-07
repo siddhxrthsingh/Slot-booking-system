@@ -21,7 +21,12 @@ async def main():
 
     # Facilities
     await db["facilities"].create_index([("campus", 1), ("sport", 1), ("sort_order", 1)])
-    await db["facilities"].create_index([("campus", 1), ("sport", 1), ("name", 1)])
+    # Facility identity (campus + sport + name) is relied on by seed_facilities.py
+    # for idempotent upserts — enforce it as unique to prevent duplicate facility
+    # documents from a bad upsert or manual insert.
+    await db["facilities"].create_index(
+        [("campus", 1), ("sport", 1), ("name", 1)], unique=True
+    )
     print("  facilities indexes")
 
     # Schedule templates
