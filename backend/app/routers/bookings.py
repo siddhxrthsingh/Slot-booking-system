@@ -54,6 +54,13 @@ async def create_booking(
 
     # Send confirmation email (best-effort)
     slot = await db["slots"].find_one({"_id": booking["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
     if slot and current_user.get("email"):
         await email_service.send_booking_confirmation(
             to_email   = current_user["email"],
@@ -128,6 +135,13 @@ async def cancel_booking(
 
     # Send cancellation email (best-effort)
     slot = await db["slots"].find_one({"_id": updated["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
     late = updated.get("late_cancel", False)
     banned_until_str = None
     if late and current_user.get("email"):

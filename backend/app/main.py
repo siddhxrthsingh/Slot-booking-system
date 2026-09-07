@@ -1,6 +1,8 @@
 import logging
 from contextlib import asynccontextmanager
 
+import json
+
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,7 +11,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import get_settings
-from app.database import close_db, connect_db
+from app.database import close_db, connect_db, get_db
+from app.dependencies import get_ws_user
 from app.routers import admin, auth, bookings
 from app.utils import error_response
 from app.ws_manager import manager as ws_manager
@@ -105,6 +108,49 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             # Keep the connection alive; we only push from server to client.
             await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — authenticated slot occupancy subscriptions
+# ---------------------------------------------------------------------------
+@app.websocket("/ws/occupancy")
+async def occupancy_ws_endpoint(websocket: WebSocket, token: str | None = None):
+    if not token:
+        await websocket.close(code=4401)
+        return
+
+    db = get_db()
+    user = await get_ws_user(token, db)
+    if not user:
+        await websocket.close(code=4401)
+        return
+
+    await ws_manager.connect_authenticated(websocket, user_id=user["id"], role=user.get("role", "student"))
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                await websocket.send_text(json.dumps({"type": "error", "data": {"message": "Invalid JSON"}}))
+                continue
+
+            action = message.get("action")
+            slot_ids = message.get("slot_ids") or []
+            slot_ids = [str(s) for s in slot_ids]
+
+            if action == "subscribe":
+                ws_manager.subscribe(websocket, slot_ids)
+                await websocket.send_text(json.dumps({"type": "subscribed", "data": {"slot_ids": slot_ids}}))
+            elif action == "unsubscribe":
+                ws_manager.unsubscribe(websocket, slot_ids)
+                await websocket.send_text(json.dumps({"type": "unsubscribed", "data": {"slot_ids": slot_ids}}))
+            else:
+                await websocket.send_text(json.dumps({"type": "error", "data": {"message": "Unknown action"}}))
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
     except Exception:
