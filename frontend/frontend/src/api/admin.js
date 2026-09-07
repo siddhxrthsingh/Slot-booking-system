@@ -71,3 +71,10 @@ export async function getAllUsers({ campus } = {}) {
   const { data } = await client.get('/admin/users', { params });
   return data.data;
 }
+
+export async function getFacilities({ campus } = {}) {
+  const params = {};
+  if (campus) params.campus = campus;
+  const { data } = await client.get('/admin/facilities', { params });
+  return data.data;
+}

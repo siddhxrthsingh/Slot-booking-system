@@ -22,6 +22,7 @@ import {
   getActiveBans,
   unbanUser,
   getAdminSlots,
+  getFacilities,
 } from '../api/admin';
 
 const announcements = [
@@ -118,7 +119,8 @@ export default function Dashboard() {
   const [approvalInProgress,setApprovalInProgress]= useState(null);
   const [activeBans,        setActiveBans]        = useState([]);
   const [adminSlots,        setAdminSlots]        = useState([]);
-  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans
+  const [facilities,        setFacilities]        = useState([]);
+  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans | facilities
 
   // Admin slot creation form
   const [slotForm,       setSlotForm]       = useState(BLANK_SLOT);
@@ -182,18 +184,20 @@ export default function Dashboard() {
       const params = {};
       if (adminFilterCampus) params.campus = adminFilterCampus;
       if (adminFilterSport)  params.sport  = adminFilterSport;
-      const [m, pb, ab, bans, slots] = await Promise.all([
+      const [m, pb, ab, bans, slots, facilityList] = await Promise.all([
         getMetrics(),
         getPendingBookings(),
         getAllBookings(),
         getActiveBans(),
         getAdminSlots(params),
+        getFacilities(),
       ]);
       setMetrics(m);
       setPendingBookings(pb);
       setAllBookings(ab);
       setActiveBans(bans);
       setAdminSlots(slots);
+      setFacilities(facilityList);
     } catch {
       showToast('Failed to load admin data.', false);
     } finally {
@@ -743,12 +747,13 @@ export default function Dashboard() {
   }
 
   const ADMIN_TABS = [
-    { id: 'overview', label: 'Dashboard', count: null },
-    { id: 'slots',    label: 'Slots',     count: adminSlots.length },
-    { id: 'bookings', label: 'Bookings',  count: allBookings.length },
-    { id: 'bans',     label: 'Bans',      count: activeBans.length },
+    { id: 'overview',   label: 'Dashboard',   count: null },
+    { id: 'facilities', label: 'Facilities',  count: facilities.length },
+    { id: 'slots',      label: 'Slots',       count: adminSlots.length },
+    { id: 'bookings',   label: 'Bookings',    count: allBookings.length },
+    { id: 'bans',       label: 'Bans',        count: activeBans.length },
   ];
-  const ADMIN_TABS_SOON = ['Facilities', 'Users / Students', 'Schedule'];
+  const ADMIN_TABS_SOON = ['Users / Students', 'Schedule'];
 
   const slotStatusPill = (status) => {
     if (status === 'open') return <span className="ad-pill ad-pill-open">{fmtStatus(status)}</span>;
@@ -861,6 +866,46 @@ export default function Dashboard() {
               </form>
             </div>
           </>
+        )}
+
+        {/* ── Facilities ── */}
+        {adminTab === 'facilities' && (
+          <div className="ad-card">
+            <div className="ad-card-head">
+              <p className="ad-card-eyebrow">RR campus inventory</p>
+              <h2 className="ad-card-title">Facilities</h2>
+            </div>
+
+            {adminLoading ? (
+              <p className="ad-empty">Loading facilities…</p>
+            ) : facilities.length === 0 ? (
+              <p className="ad-empty">No facilities found.</p>
+            ) : (
+              <div className="ad-row-list">
+                {facilities.map(f => (
+                  <div className="ad-row" key={f.id}>
+                    <div className="ad-row-main">
+                      <strong>{f.display_name || f.name}</strong>
+                      <p className="ad-row-sub">{f.sport}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong>{fmtStatus(f.facility_type)}</strong>
+                      <p className="ad-row-sub">{f.name}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong>{f.capacity}</strong>
+                      <p className="ad-row-sub">capacity</p>
+                    </div>
+                    {f.is_active ? (
+                      <span className="ad-pill ad-pill-open">Active</span>
+                    ) : (
+                      <span className="ad-pill ad-pill-neutral">Inactive</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── Slots ── */}
