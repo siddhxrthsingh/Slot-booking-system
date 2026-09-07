@@ -46,6 +46,8 @@ async def get_slots(
             "status":            s["status"],
             "requires_approval": s.get("requires_approval", False),
             "created_at":        s.get("created_at"),
+            "is_manual":         s.get("is_manual", False),
+            "facility_id":       str(s["facility_id"]) if s.get("facility_id") else None,
         }
         for s in slots
     ]
@@ -85,12 +87,29 @@ async def update_slot(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    for key in ("_id", "created_by", "created_at", "booked_count"):
-        updates.pop(key, None)
-
-    slot = await admin_service.update_slot(db, slot_id, updates)
-    if not slot:
+    existing = await db["slots"].find_one({"_id": ObjectId(slot_id)})
+    if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slot not found")
+
+    if existing.get("is_manual"):
+        # Validated, facility-authoritative edit flow (Phase 6.2) — generated
+        # slots never go through this branch, and this function itself also
+        # rejects a non-manual slot defensively.
+        for key in ("_id", "created_by", "created_at", "booked_count", "is_manual"):
+            updates.pop(key, None)
+        try:
+            slot = await admin_service.update_manual_slot(db, slot_id, updates)
+        except LookupError as e:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    else:
+        # Unchanged: generated slots keep their existing free-text edit path.
+        for key in ("_id", "created_by", "created_at", "booked_count"):
+            updates.pop(key, None)
+        slot = await admin_service.update_slot(db, slot_id, updates)
+        if not slot:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slot not found")
 
     await ws_manager.broadcast("slot_updated", {"slot_id": slot_id})
     return success_response(data={"slot_id": slot_id}, message="Slot updated")

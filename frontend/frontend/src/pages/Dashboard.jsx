@@ -395,21 +395,32 @@ export default function Dashboard() {
 
   function startEditSlot(slot) {
     setEditingSlot(slot.id);
-    setEditForm({
-      sport:      slot.sport,
-      venue:      slot.venue,
-      campus:     slot.campus,
-      capacity:   slot.capacity,
-      start_time: slot.start_time,
-      end_time:   slot.end_time,
-      date:       fmtDate(slot.date),
-    });
+    if (slot.is_manual) {
+      setEditForm({
+        facility_id: slot.facility_id || '',
+        start_time:  slot.start_time,
+        end_time:    slot.end_time,
+        date:        fmtDate(slot.date),
+      });
+    } else {
+      setEditForm({
+        sport:      slot.sport,
+        venue:      slot.venue,
+        campus:     slot.campus,
+        capacity:   slot.capacity,
+        start_time: slot.start_time,
+        end_time:   slot.end_time,
+        date:       fmtDate(slot.date),
+      });
+    }
   }
 
-  async function handleSaveEdit(slotId) {
+  async function handleSaveEdit(slotId, isManual) {
     setEditLoading(true);
     try {
-      const payload = { ...editForm, capacity: parseInt(editForm.capacity, 10) };
+      const payload = isManual
+        ? { facility_id: editForm.facility_id, start_time: editForm.start_time, end_time: editForm.end_time }
+        : { ...editForm, capacity: parseInt(editForm.capacity, 10) };
       if (editForm.date) payload.date = new Date(editForm.date).toISOString();
       await updateSlot(slotId, payload);
       showToast('Slot updated!');
@@ -978,25 +989,57 @@ export default function Dashboard() {
                       {editingSlot === sl.id ? (
                         <div className="ad-row" style={{ alignItems: 'flex-start' }}>
                           <div className="ad-edit-grid">
-                            <label>
-                              <span>Venue</span>
-                              <input className="ad-input" value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
-                            </label>
-                            <label>
-                              <span>Capacity</span>
-                              <input className="ad-input" type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
-                            </label>
-                            <label>
-                              <span>Start</span>
-                              <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
-                            </label>
-                            <label>
-                              <span>End</span>
-                              <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
-                            </label>
+                            {sl.is_manual ? (
+                              <>
+                                <label style={{ gridColumn: '1/-1' }}>
+                                  <span>Facility</span>
+                                  <select
+                                    className="ad-input"
+                                    value={editForm.facility_id}
+                                    onChange={e => setEditForm(f => ({ ...f, facility_id: e.target.value }))}
+                                  >
+                                    <option value="">Select a facility…</option>
+                                    {facilities.filter(f => f.is_active).map(f => (
+                                      <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  <span>Date</span>
+                                  <input className="ad-input" type="date" value={editForm.date} onChange={e => setEditForm(f => ({ ...f, date: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Start</span>
+                                  <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>End</span>
+                                  <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
+                                </label>
+                              </>
+                            ) : (
+                              <>
+                                <label>
+                                  <span>Venue</span>
+                                  <input className="ad-input" value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Capacity</span>
+                                  <input className="ad-input" type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Start</span>
+                                  <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>End</span>
+                                  <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
+                                </label>
+                              </>
+                            )}
                           </div>
                           <div className="ad-btn-row" style={{ alignSelf: 'flex-end' }}>
-                            <button className="ad-btn-primary ad-btn-sm" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id)}>
+                            <button className="ad-btn-primary ad-btn-sm" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id, sl.is_manual)}>
                               {editLoading ? '…' : 'Save'}
                             </button>
                             <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => setEditingSlot(null)}>Discard</button>

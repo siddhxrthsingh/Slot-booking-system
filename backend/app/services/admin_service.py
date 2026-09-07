@@ -130,6 +130,114 @@ async def update_slot(
     return updated
 
 
+async def update_manual_slot(
+    db: AsyncIOMotorDatabase, slot_id: str, updates: dict
+) -> dict:
+    """Edit a manual slot's facility/date/start_time/end_time.
+
+    Mirrors create_slot's validation exactly: the facility (existing or a
+    newly selected one) is the authoritative source for sport, facility_name,
+    venue, campus, and capacity — never trusted from caller-supplied data.
+    Only slots with is_manual=true may be edited through this function;
+    generated slots are rejected outright and left untouched.
+    """
+    try:
+        slot_oid = ObjectId(slot_id)
+    except (InvalidId, TypeError):
+        raise ValueError("Invalid slot_id.")
+
+    slot = await db["slots"].find_one({"_id": slot_oid})
+    if not slot:
+        raise LookupError("Slot not found.")
+    if not slot.get("is_manual"):
+        raise ValueError("Only manual slots can be edited through this flow.")
+
+    facility_id_input = updates.get("facility_id")
+    if facility_id_input:
+        try:
+            facility_oid = ObjectId(facility_id_input)
+        except (InvalidId, TypeError):
+            raise ValueError("A valid facility_id is required.")
+    else:
+        facility_oid = slot["facility_id"]
+
+    facility = await db["facilities"].find_one({"_id": facility_oid})
+    if not facility:
+        raise LookupError("Facility not found.")
+    if not facility.get("is_active", True):
+        raise ValueError("Facility is not active.")
+    if facility["campus"] != "RR":
+        raise ValueError("Only RR campus facilities are supported.")
+
+    new_date       = updates.get("date", slot["date"])
+    new_start_time = updates.get("start_time", slot["start_time"])
+    new_end_time   = updates.get("end_time", slot["end_time"])
+
+    candidate = {"date": new_date, "start_time": new_start_time, "end_time": new_end_time}
+    new_start = _slot_start_dt(candidate)
+    new_end   = _slot_end_dt(candidate)
+    if new_end <= new_start:
+        raise ValueError("End time must be after start time.")
+
+    # ── Overlap check: same facility, same day, any other non-cancelled slot ─
+    day_start = new_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end   = day_start + timedelta(days=1)
+    same_day_slots = await db["slots"].find({
+        "facility_id": facility_oid,
+        "status":      {"$ne": "cancelled"},
+        "date":        {"$gte": day_start, "$lt": day_end},
+        "_id":         {"$ne": slot_oid},
+    }).to_list(length=200)
+    for existing in same_day_slots:
+        existing_start = _slot_start_dt(existing)
+        existing_end   = _slot_end_dt(existing)
+        if new_start < existing_end and new_end > existing_start:
+            raise ValueError(
+                "This edit would overlap an existing slot for this facility."
+            )
+
+    # ── Active-participant conflict guard ────────────────────────────────────
+    # Changing the facility would change sport/venue/capacity out from under
+    # anyone who already joined; shrinking effective capacity below the
+    # current active headcount is likewise never allowed.
+    active_count = await db["bookings"].count_documents(
+        {"slot_id": slot_oid, "status": {"$ne": "cancelled"}}
+    )
+    if active_count > 0:
+        facility_changing = str(facility_oid) != str(slot.get("facility_id"))
+        if facility_changing:
+            raise ValueError(
+                "Cannot change the facility for a slot with active participants."
+            )
+        if active_count > facility["capacity"]:
+            raise ValueError(
+                "Cannot reduce capacity below the number of active participants."
+            )
+
+    duration_minutes = int((new_end - new_start).total_seconds() // 60)
+
+    update_fields = {
+        "facility_id":      facility_oid,
+        "facility_name":    facility["display_name"],
+        "sport":            facility["sport"],
+        "venue":            facility["display_name"],
+        "campus":           facility["campus"],
+        "capacity":         facility["capacity"],
+        "date":             new_date,
+        "start_time":       new_start_time,
+        "end_time":         new_end_time,
+        "duration_minutes": duration_minutes,
+        "is_manual":        True,
+        "updated_at":       datetime.now(timezone.utc),
+    }
+    updated = await db["slots"].find_one_and_update(
+        {"_id": slot_oid},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    return updated
+
+
 async def cancel_slot(db: AsyncIOMotorDatabase, slot_id: str) -> int:
     """Cancel a slot and cascade-cancel all non-cancelled bookings."""
     slot_oid = ObjectId(slot_id)
