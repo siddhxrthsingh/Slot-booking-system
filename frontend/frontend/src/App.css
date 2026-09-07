@@ -1324,6 +1324,12 @@
   font-size: 0.82rem;
 }
 
+.sd-status-cancelled {
+  color: var(--sd-muted);
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+
 .sd-booking-id {
   font-family: var(--sd-font-mono);
   font-size: 0.68rem;

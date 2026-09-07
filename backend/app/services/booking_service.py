@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from app.config import get_settings
+from app.services.slot_generation_service import generate_slots_for_date
 
 settings = get_settings()
 
@@ -127,6 +128,9 @@ async def list_available_slots(
     campus: str | None = None,
     venue: str | None = None,
 ) -> list[dict]:
+    if date:
+        await generate_slots_for_date(db, date, campus=campus or "RR")
+
     query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
         query["sport"] = {"$regex": sport, "$options": "i"}
@@ -328,9 +332,14 @@ async def get_user_bookings(
 
     bookings = await db["bookings"].find(query).sort("created_at", -1).to_list(length=200)
 
+    now = datetime.now(timezone.utc)
     enriched = []
     for b in bookings:
         slot = await db["slots"].find_one({"_id": b["slot_id"]})
+        # A booking is "past" once its slot's end time has elapsed. A booking
+        # whose slot no longer exists can't be upcoming, so it's treated as
+        # past too — it only ever shows up in history.
+        is_past = (_slot_end_dt(slot) < now) if slot else True
         entry = {
             "id":           str(b["_id"]),
             "slot_id":      str(b["slot_id"]),
@@ -340,6 +349,8 @@ async def get_user_bookings(
             "cancelled_at": b.get("cancelled_at"),
             "notes":        b.get("notes"),
             "created_at":   b["created_at"],
+            "is_leader":    b.get("is_leader", False),
+            "is_past":      is_past,
         }
         if slot:
             entry.update({

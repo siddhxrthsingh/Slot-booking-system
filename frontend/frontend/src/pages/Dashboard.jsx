@@ -189,8 +189,21 @@ export default function Dashboard() {
       // RR only for now — sport filtering happens client-side (below) so the
       // filter dropdown's option list can be derived from the full set of
       // facilities/sports the backend actually returns.
-      const data = await getAvailableSlots({ campus: 'RR' });
-      setSlots(data);
+      //
+      // Today and tomorrow are requested explicitly (rather than relying on
+      // an implicit "no date" query) so each request hits the backend's
+      // existing lazy generate_slots_for_date() trigger for that specific
+      // date — otherwise slots for a date are never generated.
+      const today = new Date();
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const [todaySlots, tomorrowSlots] = await Promise.all([
+        getAvailableSlots({ campus: 'RR', date: today.toISOString() }),
+        getAvailableSlots({ campus: 'RR', date: tomorrow.toISOString() }),
+      ]);
+      const byId = new Map();
+      [...todaySlots, ...tomorrowSlots].forEach((s) => byId.set(s.id, s));
+      setSlots([...byId.values()]);
       setSlotsError(null);
     } catch {
       setSlotsError('Failed to load available slots.');
@@ -657,7 +670,11 @@ export default function Dashboard() {
     }),
   })).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
 
-  const activeBookings = myBookings.filter(b => b.status !== 'cancelled');
+  // `is_past` is computed server-side (backend is authoritative for slot
+  // end-time comparisons) — a booking is "active/upcoming" only while it is
+  // neither cancelled nor past; everything else goes to history.
+  const activeBookings = myBookings.filter(b => b.status !== 'cancelled' && !b.is_past);
+  const historyBookings = myBookings.filter(b => b.status === 'cancelled' || b.is_past);
   // Derived purely from existing state (myBookings) — not a new backend
   // rule — so slot cards can show "Joined" instead of "Join" for slots the
   // student already has an active participation in.
@@ -962,6 +979,48 @@ export default function Dashboard() {
                     You can join up to {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day. Leave a slot early if your plans change.
                   </span>
                 </div>
+              </div>
+
+              {/* ── History (past + cancelled bookings) ── */}
+              <div className="sd-card">
+                <div className="sd-card-head">
+                  <div>
+                    <p className="sd-section-eyebrow">Past activity</p>
+                    <h3 className="sd-section-title" style={{ fontSize: '1.15rem' }}>History</h3>
+                  </div>
+                </div>
+
+                {bookingsLoading ? (
+                  <p className="sd-empty">Loading…</p>
+                ) : historyBookings.length === 0 ? (
+                  <p className="sd-empty">No past bookings yet.</p>
+                ) : (
+                  <div className="sd-booking-list">
+                    {historyBookings.map((bk) => (
+                      <div className="sd-booking-item" key={bk.id}>
+                        <div className="sd-booking-item-head">
+                          <span className="sd-booking-sport">
+                            <span className="sd-dot" />
+                            {bk.sport}
+                          </span>
+                        </div>
+                        <p className="sd-booking-meta">
+                          🕒 {bk.slot_date ? fmtDate(bk.slot_date) : '—'}
+                          {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
+                        </p>
+                        <p className="sd-booking-meta">
+                          📍 {bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}
+                        </p>
+                        <div className="sd-booking-footer">
+                          <span className={bk.status === 'cancelled' ? 'sd-status-cancelled' : 'sd-status-confirmed'}>
+                            {bk.status === 'cancelled' ? '✕' : '✓'} {fmtStatus(bk.status)}
+                          </span>
+                          <span className="sd-booking-id">#{bk.id.slice(-4)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </aside>
           </div>

@@ -4,6 +4,11 @@ from datetime import datetime, timedelta, timezone
 from app.services.booking_service import list_available_slots, serialize_student_slot
 
 
+class FakeUpdateResult:
+    def __init__(self, inserted):
+        self.upserted_id = "new-id" if inserted else None
+
+
 class FakeCursor:
     def __init__(self, docs):
         self.docs = list(docs)
@@ -27,10 +32,23 @@ class FakeCollection:
     def find(self, query):
         return FakeCursor([doc for doc in self.docs if matches(doc, query)])
 
+    async def update_one(self, query, update, upsert=False):
+        for doc in self.docs:
+            if matches(doc, query):
+                return FakeUpdateResult(False)
+        if upsert:
+            self.docs.append(dict(update["$setOnInsert"]))
+            return FakeUpdateResult(True)
+        return FakeUpdateResult(False)
+
 
 class FakeDb:
-    def __init__(self, slots):
-        self.collections = {"slots": FakeCollection(slots)}
+    def __init__(self, slots, facilities=None, templates=None):
+        self.collections = {
+            "slots": FakeCollection(slots),
+            "facilities": FakeCollection(facilities or []),
+            "schedule_templates": FakeCollection(templates or []),
+        }
 
     def __getitem__(self, name):
         return self.collections[name]
@@ -154,6 +172,196 @@ class FacilitySlotRetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(item["facility_id"])
         self.assertIsNone(item["facility_name"])
         self.assertEqual(item["venue"], "Legacy Venue")
+
+
+def future_weekday():
+    d = future_date()
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def _student_period(start, end):
+    return {
+        "start_time": start,
+        "end_time": end,
+        "period_type": "student",
+        "duration_minutes": 60,
+        "is_bookable": True,
+    }
+
+
+class AutomaticGenerationOnRetrievalTests(unittest.IsolatedAsyncioTestCase):
+    """Requesting available slots for a date with no generated slots yet must
+    trigger generate_slots_for_date() before the query runs."""
+
+    def _weekday_db(self):
+        facilities = [
+            {
+                "_id": "badminton-1", "campus": "RR", "sport": "Badminton",
+                "name": "Court 1", "display_name": "Badminton Court 1",
+                "capacity": 6, "is_active": True, "sort_order": 1,
+            },
+        ]
+        templates = [
+            {
+                "campus": "RR", "sport": "Badminton", "facility_scope": "sport",
+                "day_type": "weekday",
+                "periods": [_student_period("09:00", "10:00"), _student_period("10:00", "11:00")],
+                "is_active": True, "priority": 10, "updated_at": datetime(2026, 1, 1),
+            },
+        ]
+        return FakeDb([], facilities=facilities, templates=templates)
+
+    async def test_requesting_slots_for_date_generates_them_first(self):
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+
+        self.assertEqual(db["slots"].docs, [])
+
+        result = await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+
+        generated = [s for s in db["slots"].docs if s.get("slot_type") == "generated"]
+        self.assertEqual(len(generated), 2)
+        self.assertEqual({item["start_time"] for item in result}, {"09:00", "10:00"})
+
+    async def test_generation_trigger_is_idempotent_on_repeat_requests(self):
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+
+        first = await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+        second = await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(second), 2)
+        self.assertEqual(
+            len([s for s in db["slots"].docs if s.get("slot_type") == "generated"]), 2
+        )
+
+    async def test_existing_generated_slot_state_is_preserved_across_retrieval(self):
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+        db["slots"].docs.append(slot(
+            _id="existing", date=weekday_date, start_time="09:00", end_time="10:00",
+            facility_id="badminton-1", facility_name="Badminton Court 1",
+            booked_count=3, status="open",
+        ))
+
+        result = await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+
+        existing = next(item for item in result if item["_id"] == "existing")
+        self.assertEqual(existing["booked_count"], 3)
+        # only the missing 10:00 slot should have been newly generated
+        generated_count = len([s for s in db["slots"].docs if s.get("slot_type") == "generated"])
+        self.assertEqual(generated_count, 2)
+
+    async def test_manual_slots_are_untouched_by_generation_trigger(self):
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+        db["slots"].docs.append(slot(
+            _id="manual-1", date=weekday_date, start_time="09:00", end_time="10:30",
+            facility_id="badminton-1", facility_name="Badminton Court 1",
+            slot_type="manual", is_manual=True, duration_minutes=90,
+        ))
+
+        result = await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+
+        manual_ids = [item["_id"] for item in result if item.get("is_manual")]
+        self.assertIn("manual-1", manual_ids)
+        manual_doc = next(s for s in db["slots"].docs if s["_id"] == "manual-1")
+        self.assertEqual(manual_doc["start_time"], "09:00")
+        self.assertEqual(manual_doc["end_time"], "10:30")
+
+    async def test_no_date_requested_does_not_trigger_generation(self):
+        db = self._weekday_db()
+
+        await list_available_slots(db, sport="Badminton", campus="RR")
+
+        self.assertEqual(db["slots"].docs, [])
+
+    async def test_requesting_todays_date_generates_todays_slots(self):
+        """Dashboard now explicitly requests today's date; this must trigger
+        generation for today the same way it already does for other dates."""
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        while today.weekday() >= 5:
+            today += timedelta(days=1)
+        db = self._weekday_db()
+
+        await list_available_slots(db, sport="Badminton", date=today, campus="RR")
+
+        # Generation itself must happen for today regardless of what time of
+        # day the test runs at; whether an individual period is still visible
+        # in the result once generated is covered separately by
+        # PastSlotVisibilityTests (a period already elapsed today is
+        # correctly filtered out of student-facing results).
+        generated = [s for s in db["slots"].docs if s.get("slot_type") == "generated"]
+        self.assertEqual(len(generated), 2)
+        self.assertTrue(all(s["date"] == today for s in generated))
+
+    async def test_requesting_tomorrows_date_generates_tomorrows_slots(self):
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow = today + timedelta(days=1)
+        while tomorrow.weekday() >= 5:
+            tomorrow += timedelta(days=1)
+        db = self._weekday_db()
+
+        result = await list_available_slots(db, sport="Badminton", date=tomorrow, campus="RR")
+
+        generated = [s for s in db["slots"].docs if s.get("slot_type") == "generated"]
+        self.assertEqual(len(generated), 2)
+        self.assertTrue(all(s["date"] == tomorrow for s in generated))
+        self.assertEqual(len(result), 2)
+
+
+class PastSlotVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    """Student-facing retrieval must never surface a slot whose end time has
+    already elapsed, without deleting the underlying document."""
+
+    async def test_slot_that_already_ended_today_is_excluded(self):
+        now = datetime.now(timezone.utc)
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed_end = now - timedelta(minutes=5)
+        db = FakeDb([
+            slot(
+                _id="elapsed",
+                date=today_midnight,
+                start_time=(elapsed_end - timedelta(hours=1)).strftime("%H:%M"),
+                end_time=elapsed_end.strftime("%H:%M"),
+            ),
+        ])
+
+        result = await list_available_slots(db, sport="Badminton", date=today_midnight, campus="RR")
+
+        self.assertEqual(result, [])
+        # The document itself must still exist — not deleted.
+        self.assertEqual(len(db["slots"].docs), 1)
+
+    async def test_slot_still_in_progress_or_upcoming_today_is_included(self):
+        now = datetime.now(timezone.utc)
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        future_end = now + timedelta(hours=1)
+        db = FakeDb([
+            slot(
+                _id="upcoming",
+                date=today_midnight,
+                start_time=now.strftime("%H:%M"),
+                end_time=future_end.strftime("%H:%M"),
+            ),
+        ])
+
+        result = await list_available_slots(db, sport="Badminton", date=today_midnight, campus="RR")
+
+        self.assertEqual([item["_id"] for item in result], ["upcoming"])
+
+    async def test_tomorrows_slots_remain_visible(self):
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        db = FakeDb([slot(_id="tomorrow-slot", date=tomorrow)])
+
+        result = await list_available_slots(db, sport="Badminton", date=tomorrow, campus="RR")
+
+        self.assertEqual([item["_id"] for item in result], ["tomorrow-slot"])
 
 
 if __name__ == "__main__":
