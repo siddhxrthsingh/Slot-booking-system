@@ -482,6 +482,41 @@ async def list_facilities(db: AsyncIOMotorDatabase, campus: str = "RR") -> list[
     ]
 
 
+async def list_schedule_templates(db: AsyncIOMotorDatabase, campus: str = "RR") -> list[dict]:
+    """Return all schedule templates for a campus (read-only viewer).
+
+    Ordering is deterministic: sport ascending, facility_scope ascending,
+    day_type ascending, priority descending (highest priority first).
+    """
+    templates = (
+        await db["schedule_templates"]
+        .find({"campus": campus})
+        .sort([("sport", 1), ("facility_scope", 1), ("day_type", 1), ("priority", -1)])
+        .to_list(length=500)
+    )
+    return [
+        {
+            "id":               str(t["_id"]),
+            "campus":           t["campus"],
+            "sport":            t["sport"],
+            "facility_id":      t.get("facility_id"),
+            "facility_name":    t.get("facility_name"),
+            "facility_scope":   t["facility_scope"],
+            "day_type":         t["day_type"],
+            "periods":          t.get("periods", []),
+            "is_active":        t.get("is_active", True),
+            "priority":         t.get("priority", 0),
+            "effective_from":   t.get("effective_from"),
+            "effective_until":  t.get("effective_until"),
+            "created_by":       t.get("created_by"),
+            "created_at":       t.get("created_at"),
+            "updated_at":       t.get("updated_at"),
+            "notes":            t.get("notes"),
+        }
+        for t in templates
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Slot roster / accountability (read-only, admin-only)
 # ---------------------------------------------------------------------------

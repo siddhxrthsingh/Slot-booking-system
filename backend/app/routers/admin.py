@@ -316,6 +316,17 @@ async def get_facilities(
     return success_response(data=facilities, message="Facilities fetched")
 
 
+@router.get("/schedule-templates")
+async def get_schedule_templates(
+    campus: Literal["RR"] = Query(default="RR"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Read-only schedule template viewer (RR only for now)."""
+    templates = await admin_service.list_schedule_templates(db, campus)
+    return success_response(data=templates, message="Schedule templates fetched")
+
+
 @router.get("/users")
 async def list_users(
     campus: Literal["RR", "EC"] | None = Query(default=None),

@@ -83,3 +83,10 @@ export async function getSlotRoster(slotId) {
   const { data } = await client.get(`/admin/slots/${slotId}/roster`);
   return data.data;
 }
+
+export async function getScheduleTemplates({ campus } = {}) {
+  const params = {};
+  if (campus) params.campus = campus;
+  const { data } = await client.get('/admin/schedule-templates', { params });
+  return data.data;
+}

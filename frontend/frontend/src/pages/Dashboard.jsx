@@ -24,6 +24,7 @@ import {
   getAdminSlots,
   getFacilities,
   getSlotRoster,
+  getScheduleTemplates,
 } from '../api/admin';
 
 const announcements = [
@@ -122,7 +123,8 @@ export default function Dashboard() {
   const [activeBans,        setActiveBans]        = useState([]);
   const [adminSlots,        setAdminSlots]        = useState([]);
   const [facilities,        setFacilities]        = useState([]);
-  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans | facilities
+  const [scheduleTemplates, setScheduleTemplates] = useState([]);
+  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans | facilities | schedule
 
   // Slot roster modal (admin-only accountability view)
   const [rosterSlotId, setRosterSlotId] = useState(null);
@@ -192,13 +194,14 @@ export default function Dashboard() {
       const params = {};
       if (adminFilterCampus) params.campus = adminFilterCampus;
       if (adminFilterSport)  params.sport  = adminFilterSport;
-      const [m, pb, ab, bans, slots, facilityList] = await Promise.all([
+      const [m, pb, ab, bans, slots, facilityList, templates] = await Promise.all([
         getMetrics(),
         getPendingBookings(),
         getAllBookings(),
         getActiveBans(),
         getAdminSlots(params),
         getFacilities(),
+        getScheduleTemplates(),
       ]);
       setMetrics(m);
       setPendingBookings(pb);
@@ -206,6 +209,7 @@ export default function Dashboard() {
       setActiveBans(bans);
       setAdminSlots(slots);
       setFacilities(facilityList);
+      setScheduleTemplates(templates);
     } catch {
       showToast('Failed to load admin data.', false);
     } finally {
@@ -791,11 +795,12 @@ export default function Dashboard() {
   const ADMIN_TABS = [
     { id: 'overview',   label: 'Dashboard',   count: null },
     { id: 'facilities', label: 'Facilities',  count: facilities.length },
+    { id: 'schedule',   label: 'Schedule',     count: scheduleTemplates.length },
     { id: 'slots',      label: 'Slots',       count: adminSlots.length },
     { id: 'bookings',   label: 'Bookings',    count: allBookings.length },
     { id: 'bans',       label: 'Bans',        count: activeBans.length },
   ];
-  const ADMIN_TABS_SOON = ['Users / Students', 'Schedule'];
+  const ADMIN_TABS_SOON = ['Users / Students'];
 
   const slotStatusPill = (status) => {
     if (status === 'open') return <span className="ad-pill ad-pill-open">{fmtStatus(status)}</span>;
@@ -950,6 +955,57 @@ export default function Dashboard() {
                     ) : (
                       <span className="ad-pill ad-pill-neutral">Inactive</span>
                     )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Schedule (read-only) ── */}
+        {adminTab === 'schedule' && (
+          <div className="ad-card">
+            <div className="ad-card-head">
+              <p className="ad-card-eyebrow">RR campus templates</p>
+              <h2 className="ad-card-title">Schedule</h2>
+            </div>
+
+            {adminLoading ? (
+              <p className="ad-empty">Loading schedule templates…</p>
+            ) : scheduleTemplates.length === 0 ? (
+              <p className="ad-empty">No schedule templates found.</p>
+            ) : (
+              <div className="ad-row-list">
+                {scheduleTemplates.map(t => (
+                  <div className="ad-row" key={t.id} style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                      <div className="ad-row-main">
+                        <strong>{t.facility_name || t.sport}</strong>
+                        <p className="ad-row-sub">
+                          {t.sport} · {t.facility_scope === 'facility' ? 'Facility-specific' : 'Sport-level'} · {fmtStatus(t.day_type)}
+                        </p>
+                      </div>
+                      {t.is_active ? (
+                        <span className="ad-pill ad-pill-open">Active</span>
+                      ) : (
+                        <span className="ad-pill ad-pill-neutral">Inactive</span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {(t.periods || []).map((p, i) => (
+                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '13px' }}>
+                          <span>{p.start_time}–{p.end_time}{p.label ? ` · ${p.label}` : ''}</span>
+                          <span style={{ display: 'flex', gap: '8px' }}>
+                            <span className="ad-row-sub">{fmtStatus(p.period_type)}</span>
+                            {p.is_bookable ? (
+                              <span className="ad-pill ad-pill-open">Bookable</span>
+                            ) : (
+                              <span className="ad-pill ad-pill-neutral">Non-bookable</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
