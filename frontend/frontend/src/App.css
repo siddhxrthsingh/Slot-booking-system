@@ -2019,6 +2019,139 @@
   font-size: 0.9rem;
 }
 
+/* ── Slot roster modal ── */
+.ad-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 20, 30, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  z-index: 200;
+  overflow-y: auto;
+}
+
+.ad-modal {
+  width: min(640px, 100%);
+  background: var(--sd-surface);
+  border: 1px solid var(--sd-border);
+  border-radius: 20px;
+  box-shadow: 0 30px 70px rgba(20, 20, 30, 0.28);
+  padding: 24px;
+}
+
+.ad-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.ad-modal-close {
+  border: 1px solid var(--sd-border);
+  background: var(--sd-surface);
+  color: var(--sd-muted);
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ad-modal-close:hover {
+  color: var(--sd-accent);
+  border-color: var(--sd-accent-soft);
+}
+
+.ad-roster-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--sd-border);
+  border-radius: 14px;
+  background: var(--sd-bg);
+  margin-bottom: 18px;
+}
+
+.ad-roster-summary-label {
+  margin: 0 0 4px;
+  font-family: var(--sd-font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sd-muted);
+}
+
+.ad-roster-summary-value {
+  margin: 0;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--sd-ink);
+}
+
+.ad-roster-section-title {
+  margin: 0 0 10px;
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: var(--sd-ink);
+}
+
+.ad-roster-section {
+  margin-bottom: 20px;
+}
+
+.ad-roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ad-roster-participant {
+  border: 1px solid var(--sd-border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: var(--sd-bg);
+}
+
+.ad-roster-participant.cancelled {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.ad-roster-participant-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.ad-roster-participant-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--sd-ink);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ad-roster-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px 14px;
+  font-size: 0.78rem;
+  color: var(--sd-muted);
+}
+
+.ad-roster-detail-grid strong {
+  color: var(--sd-ink);
+  font-weight: 600;
+}
+
 .ad-edit-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

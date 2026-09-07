@@ -78,3 +78,8 @@ export async function getFacilities({ campus } = {}) {
   const { data } = await client.get('/admin/facilities', { params });
   return data.data;
 }
+
+export async function getSlotRoster(slotId) {
+  const { data } = await client.get(`/admin/slots/${slotId}/roster`);
+  return data.data;
+}

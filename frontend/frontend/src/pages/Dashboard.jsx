@@ -23,6 +23,7 @@ import {
   unbanUser,
   getAdminSlots,
   getFacilities,
+  getSlotRoster,
 } from '../api/admin';
 
 const announcements = [
@@ -121,6 +122,12 @@ export default function Dashboard() {
   const [adminSlots,        setAdminSlots]        = useState([]);
   const [facilities,        setFacilities]        = useState([]);
   const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans | facilities
+
+  // Slot roster modal (admin-only accountability view)
+  const [rosterSlotId, setRosterSlotId] = useState(null);
+  const [rosterData,   setRosterData]   = useState(null);
+  const [rosterLoading,setRosterLoading]= useState(false);
+  const [rosterError,  setRosterError]  = useState(null);
 
   // Admin slot creation form
   const [slotForm,       setSlotForm]       = useState(BLANK_SLOT);
@@ -336,6 +343,28 @@ export default function Dashboard() {
     } catch {
       showToast('Failed to lift ban.', false);
     }
+  }
+
+  async function handleViewRoster(slotId) {
+    setRosterSlotId(slotId);
+    setRosterData(null);
+    setRosterError(null);
+    setRosterLoading(true);
+    try {
+      const data = await getSlotRoster(slotId);
+      setRosterData(data);
+    } catch (err) {
+      setRosterError(err.response?.data?.detail || 'Failed to load slot roster.');
+    } finally {
+      setRosterLoading(false);
+    }
+  }
+
+  function closeRoster() {
+    setRosterSlotId(null);
+    setRosterData(null);
+    setRosterError(null);
+    setRosterLoading(false);
   }
 
   async function handleCreateSlot(e) {
@@ -985,6 +1014,7 @@ export default function Dashboard() {
                           </div>
                           {slotStatusPill(sl.status)}
                           <div className="ad-btn-row">
+                            <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => handleViewRoster(sl.id)}>Roster</button>
                             {sl.status !== 'cancelled' && (
                               <button className="ad-btn-primary ad-btn-sm" type="button" onClick={() => startEditSlot(sl)}>Edit</button>
                             )}
@@ -1104,6 +1134,120 @@ export default function Dashboard() {
           </div>
         )}
       </main>
+
+      {/* ── Slot roster modal (accountability view, admin-only) ── */}
+      {rosterSlotId && (
+        <div className="ad-modal-overlay" onClick={closeRoster}>
+          <div className="ad-modal" onClick={e => e.stopPropagation()}>
+            <div className="ad-modal-header">
+              <div>
+                <p className="ad-card-eyebrow">Slot roster</p>
+                <h2 className="ad-card-title">Occupancy &amp; accountability</h2>
+              </div>
+              <button className="ad-modal-close" type="button" onClick={closeRoster}>✕ Close</button>
+            </div>
+
+            {rosterLoading ? (
+              <p className="ad-empty">Loading roster…</p>
+            ) : rosterError ? (
+              <p className="ad-empty" style={{ color: 'var(--sd-accent)' }}>{rosterError}</p>
+            ) : rosterData ? (
+              (() => {
+                const { slot, participants } = rosterData;
+                const active = participants.filter(p => p.status !== 'cancelled');
+                const cancelled = participants.filter(p => p.status === 'cancelled');
+                const leader = active.find(p => p.is_leader);
+                return (
+                  <>
+                    <div className="ad-roster-summary">
+                      <div>
+                        <p className="ad-roster-summary-label">Sport</p>
+                        <p className="ad-roster-summary-value">{slot.sport}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Facility</p>
+                        <p className="ad-roster-summary-value">{slot.facility_name || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Date / time</p>
+                        <p className="ad-roster-summary-value">{fmtDate(slot.date)}, {slot.start_time}–{slot.end_time}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Occupancy</p>
+                        <p className="ad-roster-summary-value">{slot.booked_count}/{slot.capacity} booked</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Leader</p>
+                        <p className="ad-roster-summary-value">{leader?.user_snapshot?.name || leader?.user_snapshot?.srn || '—'}</p>
+                      </div>
+                    </div>
+
+                    <div className="ad-roster-section">
+                      <p className="ad-roster-section-title">Active participants ({active.length})</p>
+                      {active.length === 0 ? (
+                        <p className="ad-empty">No one has joined this slot yet.</p>
+                      ) : (
+                        <div className="ad-roster-list">
+                          {active.map(p => (
+                            <div className="ad-roster-participant" key={p.booking_id}>
+                              <div className="ad-roster-participant-head">
+                                <span className="ad-roster-participant-name">
+                                  {p.user_snapshot?.name || '—'}
+                                  {p.is_leader && <span className="ad-pill ad-pill-open">Leader</span>}
+                                </span>
+                                <span className="ad-roster-summary-label" style={{ margin: 0 }}>
+                                  Joined {fmt(p.joined_at)}
+                                </span>
+                              </div>
+                              <div className="ad-roster-detail-grid">
+                                <span><strong>SRN:</strong> {p.user_snapshot?.srn || '—'}</span>
+                                <span><strong>Phone:</strong> {p.user_snapshot?.phone || '—'}</span>
+                                <span><strong>Branch:</strong> {p.user_snapshot?.branch || '—'}</span>
+                                <span><strong>Program:</strong> {p.user_snapshot?.program || '—'}</span>
+                                <span><strong>Semester:</strong> {p.user_snapshot?.semester || '—'}</span>
+                                <span><strong>Section:</strong> {p.user_snapshot?.section || '—'}</span>
+                                <span><strong>Campus:</strong> {p.user_snapshot?.campus || '—'}</span>
+                                <span><strong>Status:</strong> {fmtStatus(p.status)}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="ad-roster-section">
+                      <p className="ad-roster-section-title">Historical / cancelled ({cancelled.length})</p>
+                      {cancelled.length === 0 ? (
+                        <p className="ad-empty">No cancellations recorded for this slot.</p>
+                      ) : (
+                        <div className="ad-roster-list">
+                          {cancelled.map(p => (
+                            <div className="ad-roster-participant cancelled" key={p.booking_id}>
+                              <div className="ad-roster-participant-head">
+                                <span className="ad-roster-participant-name">{p.user_snapshot?.name || '—'}</span>
+                                <span className="ad-roster-summary-label" style={{ margin: 0 }}>
+                                  Joined {fmt(p.joined_at)}
+                                </span>
+                              </div>
+                              <div className="ad-roster-detail-grid">
+                                <span><strong>SRN:</strong> {p.user_snapshot?.srn || '—'}</span>
+                                <span><strong>Branch:</strong> {p.user_snapshot?.branch || '—'}</span>
+                                <span><strong>Campus:</strong> {p.user_snapshot?.campus || '—'}</span>
+                                <span><strong>Cancelled:</strong> {fmt(p.cancelled_at)}</span>
+                                <span><strong>Cancelled by:</strong> {p.cancelled_by ? `#${p.cancelled_by.slice(-4)}` : '—'}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
