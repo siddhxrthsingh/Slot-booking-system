@@ -262,6 +262,17 @@ async def unban_user(
     return success_response(data={"user_id": user_id}, message="Ban lifted")
 
 
+@router.get("/facilities")
+async def get_facilities(
+    campus: Literal["RR"] = Query(default="RR"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Read-only facility inventory (RR only for now)."""
+    facilities = await admin_service.list_facilities(db, campus)
+    return success_response(data=facilities, message="Facilities fetched")
+
+
 @router.get("/users")
 async def list_users(
     campus: Literal["RR", "EC"] | None = Query(default=None),

@@ -249,3 +249,35 @@ async def list_all_bookings(
             }
         )
     return enriched
+
+
+# ---------------------------------------------------------------------------
+# Facility inventory (read-only)
+# ---------------------------------------------------------------------------
+
+async def list_facilities(db: AsyncIOMotorDatabase, campus: str = "RR") -> list[dict]:
+    """Return the facility inventory for a campus, active and inactive alike.
+
+    Ordering is deterministic: sort_order ascending, then name ascending —
+    the same key used by seed_facilities.py's own verification query.
+    """
+    facilities = (
+        await db["facilities"]
+        .find({"campus": campus})
+        .sort([("sort_order", 1), ("name", 1)])
+        .to_list(length=200)
+    )
+    return [
+        {
+            "id":            str(f["_id"]),
+            "campus":        f["campus"],
+            "sport":         f["sport"],
+            "facility_type": f["facility_type"],
+            "name":          f["name"],
+            "display_name":  f["display_name"],
+            "capacity":      f["capacity"],
+            "is_active":     f.get("is_active", True),
+            "sort_order":    f.get("sort_order", 0),
+        }
+        for f in facilities
+    ]
