@@ -61,7 +61,12 @@ async def create_slot(
     slot_data = body.model_dump()
     # Force auto-confirm (no approval required)
     slot_data["requires_approval"] = False
-    slot = await admin_service.create_slot(db, slot_data, str(admin["_id"]))
+    try:
+        slot = await admin_service.create_slot(db, slot_data, str(admin["_id"]))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     await ws_manager.broadcast("slot_created", {
         "slot_id": str(slot["_id"]),
         "sport":   slot["sport"],

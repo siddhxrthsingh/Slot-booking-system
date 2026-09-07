@@ -81,9 +81,10 @@ function initials(name, srn) {
 }
 
 // ── Blank slot form ───────────────────────────────────────────────────────────
+// Manual slots are tied to a real RR facility — sport/venue/capacity are
+// derived server-side from the selected facility, never entered here.
 const BLANK_SLOT = {
-  sport: 'Football', date: '', start_time: '', end_time: '',
-  venue: '', campus: 'RR', capacity: '',
+  facility_id: '', date: '', start_time: '', end_time: '',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,16 +370,17 @@ export default function Dashboard() {
 
   async function handleCreateSlot(e) {
     e.preventDefault();
-    if (!slotForm.date || !slotForm.start_time || !slotForm.end_time || !slotForm.venue || !slotForm.capacity) {
+    if (!slotForm.facility_id || !slotForm.date || !slotForm.start_time || !slotForm.end_time) {
       showToast('Please fill in all fields.', false);
       return;
     }
     setSlotFormLoading(true);
     try {
       const payload = {
-        ...slotForm,
-        capacity: parseInt(slotForm.capacity, 10),
-        date: new Date(slotForm.date).toISOString(),
+        facility_id: slotForm.facility_id,
+        start_time:  slotForm.start_time,
+        end_time:    slotForm.end_time,
+        date:        new Date(slotForm.date).toISOString(),
       };
       await createSlot(payload);
       showToast('Slot created!');
@@ -869,23 +871,30 @@ export default function Dashboard() {
                 <h2 className="ad-card-title">Add new availability</h2>
               </div>
               <form className="ad-form-grid" onSubmit={handleCreateSlot}>
-                <label>
-                  <span>Sport</span>
-                  <select className="ad-input" value={slotForm.sport} onChange={e => setSlotForm(f => ({ ...f, sport: e.target.value }))}>
-                    {SPORTS_LIST.map(s => <option key={s}>{s}</option>)}
+                <label style={{ gridColumn: '1/-1' }}>
+                  <span>Facility</span>
+                  <select
+                    className="ad-input"
+                    value={slotForm.facility_id}
+                    onChange={e => setSlotForm(f => ({ ...f, facility_id: e.target.value }))}
+                  >
+                    <option value="">Select a facility…</option>
+                    {facilities.filter(f => f.is_active).map(f => (
+                      <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                    ))}
                   </select>
                 </label>
-                <label>
-                  <span>Campus</span>
-                  <select className="ad-input" value={slotForm.campus} onChange={e => setSlotForm(f => ({ ...f, campus: e.target.value }))}>
-                    {CAMPUSES.map(c => <option key={c}>{c}</option>)}
-                  </select>
-                </label>
+                {(() => {
+                  const selectedFacility = facilities.find(f => f.id === slotForm.facility_id);
+                  return selectedFacility ? (
+                    <p className="ad-row-sub" style={{ gridColumn: '1/-1', margin: '-6px 0 0' }}>
+                      {selectedFacility.sport} · capacity {selectedFacility.capacity}
+                    </p>
+                  ) : null;
+                })()}
                 <label><span>Date</span><input className="ad-input" type="date" value={slotForm.date} onChange={e => setSlotForm(f => ({ ...f, date: e.target.value }))} /></label>
-                <label><span>Venue</span><input className="ad-input" type="text" placeholder="e.g. Main Turf Arena" value={slotForm.venue} onChange={e => setSlotForm(f => ({ ...f, venue: e.target.value }))} /></label>
                 <label><span>Start time</span><input className="ad-input" type="time" value={slotForm.start_time} onChange={e => setSlotForm(f => ({ ...f, start_time: e.target.value }))} /></label>
                 <label><span>End time</span><input className="ad-input" type="time" value={slotForm.end_time} onChange={e => setSlotForm(f => ({ ...f, end_time: e.target.value }))} /></label>
-                <label><span>Max seats</span><input className="ad-input" type="number" min="1" placeholder="20" value={slotForm.capacity} onChange={e => setSlotForm(f => ({ ...f, capacity: e.target.value }))} /></label>
                 <div className="ad-btn-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
                   <button className="ad-btn-primary" type="submit" disabled={slotFormLoading}>
                     {slotFormLoading ? 'Creating…' : 'Create slot'}

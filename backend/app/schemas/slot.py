@@ -4,13 +4,17 @@ from pydantic import BaseModel, field_validator, model_validator
 
 
 class SlotCreate(BaseModel):
-    sport: str
+    """A manual (one-off) slot tied to a real, active RR facility.
+
+    sport, facility_name/venue, campus, and capacity are intentionally NOT
+    accepted here — they are authoritative facility data, derived
+    server-side from `facility_id` so a manual slot can never diverge from
+    the real facility record.
+    """
+    facility_id: str
     date: datetime
     start_time: str  # "HH:MM"
     end_time: str    # "HH:MM"
-    venue: str
-    campus: Literal["RR", "EC"]
-    capacity: int
     requires_approval: bool = False
 
     @field_validator("start_time", "end_time")

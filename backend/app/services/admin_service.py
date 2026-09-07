@@ -1,13 +1,13 @@
 """
 Admin service: slot management, booking approvals, metrics.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.services.booking_service import _slot_end_dt
+from app.services.booking_service import _slot_end_dt, _slot_start_dt
 
 
 def _filter_active_slots(slots: list[dict], now: datetime | None = None) -> list[dict]:
@@ -44,13 +44,78 @@ async def list_all_slots(
 
 
 async def create_slot(db: AsyncIOMotorDatabase, slot_data: dict, admin_id: str) -> dict:
-    slot_data["created_by"] = ObjectId(admin_id)
-    slot_data["created_at"] = datetime.now(timezone.utc)
-    slot_data["booked_count"] = 0
-    slot_data["status"] = "open"
-    result = await db["slots"].insert_one(slot_data)
-    slot_data["_id"] = result.inserted_id
-    return slot_data
+    """Create a manual (one-off) slot tied to a real, active RR facility.
+
+    sport, facility_name, campus, and capacity are derived entirely from the
+    facility document — never trusted from caller-supplied data — so a
+    manual slot can never diverge from the authoritative facility record.
+    Generated slots (created by slot_generation_service) are untouched by
+    this function.
+    """
+    try:
+        facility_oid = ObjectId(slot_data["facility_id"])
+    except (InvalidId, TypeError, KeyError):
+        raise ValueError("A valid facility_id is required.")
+
+    facility = await db["facilities"].find_one({"_id": facility_oid})
+    if not facility:
+        raise LookupError("Facility not found.")
+    if not facility.get("is_active", True):
+        raise ValueError("Facility is not active.")
+    if facility["campus"] != "RR":
+        raise ValueError("Only RR campus facilities are supported.")
+
+    candidate = {
+        "date":       slot_data["date"],
+        "start_time": slot_data["start_time"],
+        "end_time":   slot_data["end_time"],
+    }
+    new_start = _slot_start_dt(candidate)
+    new_end   = _slot_end_dt(candidate)
+    if new_end <= new_start:
+        raise ValueError("End time must be after start time.")
+
+    # ── Overlap check: same facility, same day, any non-cancelled slot ──────
+    day_start = new_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end   = day_start + timedelta(days=1)
+    same_day_slots = await db["slots"].find({
+        "facility_id": facility_oid,
+        "status":      {"$ne": "cancelled"},
+        "date":        {"$gte": day_start, "$lt": day_end},
+    }).to_list(length=200)
+    for existing in same_day_slots:
+        existing_start = _slot_start_dt(existing)
+        existing_end   = _slot_end_dt(existing)
+        if new_start < existing_end and new_end > existing_start:
+            raise ValueError(
+                "This manual slot overlaps an existing slot for this facility."
+            )
+
+    duration_minutes = int((new_end - new_start).total_seconds() // 60)
+
+    doc = {
+        "facility_id":       facility_oid,
+        "facility_name":     facility["display_name"],
+        "sport":             facility["sport"],
+        "date":              slot_data["date"],
+        "start_time":        slot_data["start_time"],
+        "end_time":          slot_data["end_time"],
+        "venue":             facility["display_name"],
+        "campus":            facility["campus"],
+        "capacity":          facility["capacity"],
+        "duration_minutes":  duration_minutes,
+        "slot_type":         "manual",
+        "is_manual":         True,
+        "requires_approval": slot_data.get("requires_approval", False),
+        "leader_user_id":    None,
+        "booked_count":      0,
+        "status":            "open",
+        "created_by":        ObjectId(admin_id),
+        "created_at":        datetime.now(timezone.utc),
+    }
+    result = await db["slots"].insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return doc
 
 
 async def update_slot(
