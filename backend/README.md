@@ -77,6 +77,16 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 API docs available at **http://localhost:8000/docs**
 
+### Production start command
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 4
+```
+
+Set `APP_ENV=production`, a strong `SECRET_KEY`, the real `MONGO_URI`, `PESU_AUTH_URL`,
+and `FRONTEND_ORIGIN` (comma-separated if multiple) via environment variables — never
+commit `.env`. `$PORT` is typically provided by the hosting platform.
+
 ---
 
 ## API Overview

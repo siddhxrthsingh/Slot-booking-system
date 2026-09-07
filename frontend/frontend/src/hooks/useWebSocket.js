@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { getWsBaseUrl } from './wsBaseUrl';
 
 /**
  * Connects to the backend WebSocket and calls `onMessage(event)` on each message.
@@ -16,9 +17,7 @@ export function useWebSocket(onMessage, enabled = true) {
   const connect = useCallback(() => {
     if (!enabled) return;
 
-    // Use the same host/port as the page but switch to ws:// / wss://
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws`;
+    const url = `${getWsBaseUrl()}/ws`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;

@@ -15,6 +15,11 @@ class Settings(BaseSettings):
 
     frontend_origin: str = "http://localhost:5173"
 
+    @property
+    def frontend_origins(self) -> list[str]:
+        """Comma-separated FRONTEND_ORIGIN supports multiple allowed origins in production."""
+        return [origin.strip() for origin in self.frontend_origin.split(",") if origin.strip()]
+
     rate_limit_login: str = "10/minute"
 
     # Admin credentials (employee-ID based, no external API)

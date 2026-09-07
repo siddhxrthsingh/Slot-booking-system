@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { getWsBaseUrl } from './wsBaseUrl';
 
 /**
  * Connects to the authenticated /ws/occupancy endpoint and keeps the
@@ -47,8 +48,7 @@ export function useOccupancySocket(slotIds, onUpdate, enabled = true) {
     // Avoid duplicate connections if one is already open/connecting.
     if (wsRef.current) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws/occupancy?token=${encodeURIComponent(token)}`;
+    const url = `${getWsBaseUrl()}/ws/occupancy?token=${encodeURIComponent(token)}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
