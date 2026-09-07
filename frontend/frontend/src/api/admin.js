@@ -90,3 +90,18 @@ export async function getScheduleTemplates({ campus } = {}) {
   const { data } = await client.get('/admin/schedule-templates', { params });
   return data.data;
 }
+
+export async function createScheduleTemplate(templateData) {
+  const { data } = await client.post('/admin/schedule-templates', templateData);
+  return data.data;
+}
+
+export async function updateScheduleTemplate(templateId, updates) {
+  const { data } = await client.patch(`/admin/schedule-templates/${templateId}`, updates);
+  return data.data;
+}
+
+export async function deleteScheduleTemplate(templateId) {
+  const { data } = await client.delete(`/admin/schedule-templates/${templateId}`);
+  return data.data;
+}

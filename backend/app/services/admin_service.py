@@ -518,6 +518,125 @@ async def list_schedule_templates(db: AsyncIOMotorDatabase, campus: str = "RR") 
 
 
 # ---------------------------------------------------------------------------
+# Schedule template management (create / update / activation / delete)
+# ---------------------------------------------------------------------------
+
+async def _resolve_template_facility(
+    db: AsyncIOMotorDatabase, facility_scope: str, facility_id: str | None
+) -> tuple[ObjectId | None, str | None]:
+    """Facility identity is authoritative from the facilities collection —
+    never trusted from caller-supplied facility_name — mirroring how manual
+    slots derive their facility fields in create_slot/update_manual_slot.
+    """
+    if facility_scope != "facility":
+        return None, None
+    try:
+        facility_oid = ObjectId(facility_id)
+    except (InvalidId, TypeError):
+        raise ValueError("A valid facility_id is required for a facility-scoped template.")
+    facility = await db["facilities"].find_one({"_id": facility_oid})
+    if not facility:
+        raise LookupError("Facility not found.")
+    return facility_oid, facility["display_name"]
+
+
+def _template_response(t: dict) -> dict:
+    return {
+        "id":               str(t["_id"]),
+        "campus":           t["campus"],
+        "sport":            t["sport"],
+        "facility_id":      str(t["facility_id"]) if t.get("facility_id") else None,
+        "facility_name":    t.get("facility_name"),
+        "facility_scope":   t["facility_scope"],
+        "day_type":         t["day_type"],
+        "periods":          t.get("periods", []),
+        "is_active":        t.get("is_active", True),
+        "priority":         t.get("priority", 0),
+        "effective_from":   t.get("effective_from"),
+        "effective_until":  t.get("effective_until"),
+        "created_by":       str(t["created_by"]) if t.get("created_by") else None,
+        "created_at":       t.get("created_at"),
+        "updated_at":       t.get("updated_at"),
+        "notes":            t.get("notes"),
+    }
+
+
+async def create_schedule_template(
+    db: AsyncIOMotorDatabase, data: dict, admin_id: str
+) -> dict:
+    facility_oid, facility_name = await _resolve_template_facility(
+        db, data["facility_scope"], data.get("facility_id")
+    )
+
+    doc = {
+        "campus":           data["campus"],
+        "sport":            data["sport"],
+        "facility_id":      facility_oid,
+        "facility_name":    facility_name,
+        "facility_scope":   data["facility_scope"],
+        "day_type":         data["day_type"],
+        "periods":          data["periods"],
+        "is_active":        data.get("is_active", True),
+        "priority":         data.get("priority", 0),
+        "effective_from":   data.get("effective_from"),
+        "effective_until":  data.get("effective_until"),
+        "created_by":       ObjectId(admin_id),
+        "created_at":       datetime.now(timezone.utc),
+        "updated_at":       None,
+        "notes":            data.get("notes"),
+    }
+    result = await db["schedule_templates"].insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _template_response(doc)
+
+
+async def update_schedule_template(
+    db: AsyncIOMotorDatabase, template_id: str, updates: dict
+) -> dict:
+    try:
+        template_oid = ObjectId(template_id)
+    except (InvalidId, TypeError):
+        raise ValueError("Invalid template_id.")
+
+    template = await db["schedule_templates"].find_one({"_id": template_oid})
+    if not template:
+        raise LookupError("Schedule template not found.")
+
+    update_fields = dict(updates)
+
+    facility_scope = updates.get("facility_scope", template["facility_scope"])
+    if "facility_scope" in updates or "facility_id" in updates:
+        facility_id_input = updates.get("facility_id", str(template["facility_id"]) if template.get("facility_id") else None)
+        facility_oid, facility_name = await _resolve_template_facility(db, facility_scope, facility_id_input)
+        update_fields["facility_id"] = facility_oid
+        update_fields["facility_name"] = facility_name
+        update_fields["facility_scope"] = facility_scope
+
+    update_fields["updated_at"] = datetime.now(timezone.utc)
+
+    updated = await db["schedule_templates"].find_one_and_update(
+        {"_id": template_oid},
+        {"$set": update_fields},
+        return_document=True,
+    )
+    return _template_response(updated)
+
+
+async def delete_schedule_template(db: AsyncIOMotorDatabase, template_id: str) -> None:
+    """Permanently remove a schedule template. Generated/manual slots are
+    never touched — this only affects future generation runs' template
+    resolution."""
+    try:
+        template_oid = ObjectId(template_id)
+    except (InvalidId, TypeError):
+        raise ValueError("Invalid template_id.")
+
+    result = await db["schedule_templates"].delete_one({"_id": template_oid})
+    if result.deleted_count == 0:
+        raise LookupError("Schedule template not found.")
+
+
+# ---------------------------------------------------------------------------
 # Slot roster / accountability (read-only, admin-only)
 # ---------------------------------------------------------------------------
 

@@ -8,6 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.database import get_db
 from app.dependencies import require_admin
 from app.schemas.booking import ApprovalAction
+from app.schemas.schedule_template import ScheduleTemplateCreate, ScheduleTemplateUpdate
 from app.schemas.slot import SlotCreate
 from app.services import admin_service, booking_service
 from app.utils import success_response
@@ -325,6 +326,55 @@ async def get_schedule_templates(
     """Read-only schedule template viewer (RR only for now)."""
     templates = await admin_service.list_schedule_templates(db, campus)
     return success_response(data=templates, message="Schedule templates fetched")
+
+
+@router.post("/schedule-templates")
+async def create_schedule_template(
+    body: ScheduleTemplateCreate,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    try:
+        template = await admin_service.create_schedule_template(
+            db, body.model_dump(), str(admin["_id"])
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=template, message="Schedule template created")
+
+
+@router.patch("/schedule-templates/{template_id}")
+async def update_schedule_template(
+    template_id: str,
+    body: ScheduleTemplateUpdate,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    updates = body.model_dump(exclude_unset=True)
+    try:
+        template = await admin_service.update_schedule_template(db, template_id, updates)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=template, message="Schedule template updated")
+
+
+@router.delete("/schedule-templates/{template_id}")
+async def delete_schedule_template(
+    template_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    try:
+        await admin_service.delete_schedule_template(db, template_id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data={"template_id": template_id}, message="Schedule template deleted")
 
 
 @router.get("/users")

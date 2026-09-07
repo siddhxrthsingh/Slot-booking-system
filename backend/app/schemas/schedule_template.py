@@ -38,6 +38,14 @@ class SchedulePeriodSchema(BaseModel):
         return self
 
 
+def _validate_periods_no_overlap(periods: list[SchedulePeriodSchema]) -> list[SchedulePeriodSchema]:
+    sorted_periods = sorted(periods, key=lambda p: p.start_time)
+    for prev, cur in zip(sorted_periods, sorted_periods[1:]):
+        if cur.start_time < prev.end_time:
+            raise ValueError("Periods must not overlap within a template")
+    return periods
+
+
 class ScheduleTemplateCreate(BaseModel):
     campus: Literal["RR"]
     sport: str
@@ -51,6 +59,39 @@ class ScheduleTemplateCreate(BaseModel):
     effective_from: datetime | None = None
     effective_until: datetime | None = None
     notes: str | None = None
+
+    @field_validator("periods")
+    @classmethod
+    def periods_no_overlap(cls, value: list[SchedulePeriodSchema]) -> list[SchedulePeriodSchema]:
+        return _validate_periods_no_overlap(value)
+
+    @model_validator(mode="after")
+    def facility_scope_requires_facility_id(self) -> "ScheduleTemplateCreate":
+        if self.facility_scope == "facility" and not self.facility_id:
+            raise ValueError("facility_id is required when facility_scope is 'facility'")
+        return self
+
+
+class ScheduleTemplateUpdate(BaseModel):
+    """Partial update — every field optional; only supplied fields are applied."""
+    sport: str | None = None
+    facility_id: str | None = None
+    facility_name: str | None = None
+    facility_scope: Literal["sport", "facility"] | None = None
+    day_type: Literal["weekday", "saturday", "sunday"] | None = None
+    periods: list[SchedulePeriodSchema] | None = None
+    is_active: bool | None = None
+    priority: int | None = None
+    effective_from: datetime | None = None
+    effective_until: datetime | None = None
+    notes: str | None = None
+
+    @field_validator("periods")
+    @classmethod
+    def periods_no_overlap(cls, value: list[SchedulePeriodSchema] | None) -> list[SchedulePeriodSchema] | None:
+        if value is None:
+            return value
+        return _validate_periods_no_overlap(value)
 
 
 class ScheduleTemplateResponse(ScheduleTemplateCreate):

@@ -25,6 +25,9 @@ import {
   getFacilities,
   getSlotRoster,
   getScheduleTemplates,
+  createScheduleTemplate,
+  updateScheduleTemplate,
+  deleteScheduleTemplate,
 } from '../api/admin';
 
 const announcements = [
@@ -88,6 +91,18 @@ const BLANK_SLOT = {
   facility_id: '', date: '', start_time: '', end_time: '',
 };
 
+const BLANK_PERIOD = {
+  start_time: '', end_time: '', period_type: 'student', is_bookable: true, label: '',
+};
+
+// Sport/facility values are always sourced from the facility list fetched
+// from the backend — never hardcoded here.
+const BLANK_TEMPLATE = {
+  sport: '', facility_scope: 'sport', facility_id: '', day_type: 'weekday',
+  priority: 0, is_active: true, notes: '',
+  periods: [{ ...BLANK_PERIOD }],
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const { user, logout, isAdmin } = useAuth();
@@ -144,6 +159,11 @@ export default function Dashboard() {
   // Admin filters
   const [adminFilterCampus, setAdminFilterCampus] = useState('');
   const [adminFilterSport,  setAdminFilterSport]  = useState('');
+
+  // Admin schedule template create/edit
+  const [templateForm,        setTemplateForm]        = useState(BLANK_TEMPLATE);
+  const [templateFormLoading, setTemplateFormLoading] = useState(false);
+  const [editingTemplateId,   setEditingTemplateId]   = useState(null); // null = create mode
 
   // ── Toast ─────────────────────────────────────────────────────────────────
   function showToast(msg, ok = true) {
@@ -325,6 +345,107 @@ export default function Dashboard() {
       fetchAdminData();
     } catch {
       showToast('Failed to delete slot.', false);
+    }
+  }
+
+  // ── Schedule template actions ─────────────────────────────────────────────
+  function startEditTemplate(t) {
+    setEditingTemplateId(t.id);
+    setTemplateForm({
+      sport:          t.sport,
+      facility_scope: t.facility_scope,
+      facility_id:    t.facility_id || '',
+      day_type:       t.day_type,
+      priority:       t.priority ?? 0,
+      is_active:      t.is_active,
+      notes:          t.notes || '',
+      periods: (t.periods || []).map(p => ({
+        start_time: p.start_time, end_time: p.end_time, period_type: p.period_type,
+        is_bookable: p.is_bookable, label: p.label || '',
+      })),
+    });
+  }
+
+  function cancelEditTemplate() {
+    setEditingTemplateId(null);
+    setTemplateForm(BLANK_TEMPLATE);
+  }
+
+  function updatePeriodField(index, field, value) {
+    setTemplateForm(f => ({
+      ...f,
+      periods: f.periods.map((p, i) => (i === index ? { ...p, [field]: value } : p)),
+    }));
+  }
+
+  function addPeriodRow() {
+    setTemplateForm(f => ({ ...f, periods: [...f.periods, { ...BLANK_PERIOD }] }));
+  }
+
+  function removePeriodRow(index) {
+    setTemplateForm(f => ({ ...f, periods: f.periods.filter((_, i) => i !== index) }));
+  }
+
+  async function handleSubmitTemplate(e) {
+    e.preventDefault();
+    if (!templateForm.sport || !templateForm.periods.length) {
+      showToast('Sport and at least one period are required.', false);
+      return;
+    }
+    if (templateForm.facility_scope === 'facility' && !templateForm.facility_id) {
+      showToast('Select a facility for a facility-specific template.', false);
+      return;
+    }
+    setTemplateFormLoading(true);
+    try {
+      const payload = {
+        sport:          templateForm.sport,
+        facility_scope: templateForm.facility_scope,
+        facility_id:    templateForm.facility_scope === 'facility' ? templateForm.facility_id : null,
+        day_type:       templateForm.day_type,
+        priority:       Number(templateForm.priority) || 0,
+        is_active:      templateForm.is_active,
+        notes:          templateForm.notes || null,
+        periods: templateForm.periods.map(p => ({
+          start_time: p.start_time, end_time: p.end_time, period_type: p.period_type,
+          is_bookable: p.is_bookable, label: p.label || null,
+        })),
+      };
+      if (editingTemplateId) {
+        await updateScheduleTemplate(editingTemplateId, payload);
+        showToast('Schedule template updated.');
+      } else {
+        await createScheduleTemplate({ campus: 'RR', ...payload });
+        showToast('Schedule template created.');
+      }
+      cancelEditTemplate();
+      fetchAdminData();
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to save schedule template.', false);
+    } finally {
+      setTemplateFormLoading(false);
+    }
+  }
+
+  async function handleToggleTemplateActive(t) {
+    try {
+      await updateScheduleTemplate(t.id, { is_active: !t.is_active });
+      showToast(t.is_active ? 'Template deactivated.' : 'Template activated.');
+      fetchAdminData();
+    } catch {
+      showToast('Failed to update template.', false);
+    }
+  }
+
+  async function handleDeleteTemplate(templateId) {
+    if (!window.confirm('Permanently delete this schedule template? This does not affect already-generated slots.')) return;
+    try {
+      await deleteScheduleTemplate(templateId);
+      showToast('Schedule template deleted.');
+      if (editingTemplateId === templateId) cancelEditTemplate();
+      fetchAdminData();
+    } catch {
+      showToast('Failed to delete template.', false);
     }
   }
 
@@ -962,55 +1083,190 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ── Schedule (read-only) ── */}
+        {/* ── Schedule ── */}
         {adminTab === 'schedule' && (
-          <div className="ad-card">
-            <div className="ad-card-head">
-              <p className="ad-card-eyebrow">RR campus templates</p>
-              <h2 className="ad-card-title">Schedule</h2>
+          <>
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">{editingTemplateId ? 'Editing template' : 'New template'}</p>
+                <h2 className="ad-card-title">{editingTemplateId ? 'Edit schedule template' : 'Create schedule template'}</h2>
+              </div>
+              <form className="ad-form-grid" onSubmit={handleSubmitTemplate}>
+                <label>
+                  <span>Sport</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.sport}
+                    onChange={e => setTemplateForm(f => ({ ...f, sport: e.target.value }))}
+                  >
+                    <option value="">Select a sport…</option>
+                    {[...new Set(facilities.map(f => f.sport))].map(sport => (
+                      <option key={sport} value={sport}>{sport}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Scope</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.facility_scope}
+                    onChange={e => setTemplateForm(f => ({ ...f, facility_scope: e.target.value, facility_id: '' }))}
+                  >
+                    <option value="sport">Sport-level</option>
+                    <option value="facility">Facility-specific</option>
+                  </select>
+                </label>
+                {templateForm.facility_scope === 'facility' && (
+                  <label style={{ gridColumn: '1/-1' }}>
+                    <span>Facility</span>
+                    <select
+                      className="ad-input"
+                      value={templateForm.facility_id}
+                      onChange={e => setTemplateForm(f => ({ ...f, facility_id: e.target.value }))}
+                    >
+                      <option value="">Select a facility…</option>
+                      {facilities
+                        .filter(f => !templateForm.sport || f.sport === templateForm.sport)
+                        .map(f => (
+                          <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                        ))}
+                    </select>
+                  </label>
+                )}
+                <label>
+                  <span>Day type</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.day_type}
+                    onChange={e => setTemplateForm(f => ({ ...f, day_type: e.target.value }))}
+                  >
+                    <option value="weekday">Weekday</option>
+                    <option value="saturday">Saturday</option>
+                    <option value="sunday">Sunday</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Priority</span>
+                  <input
+                    className="ad-input" type="number"
+                    value={templateForm.priority}
+                    onChange={e => setTemplateForm(f => ({ ...f, priority: e.target.value }))}
+                  />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', flexDirection: 'row' }}>
+                  <input
+                    type="checkbox"
+                    checked={templateForm.is_active}
+                    onChange={e => setTemplateForm(f => ({ ...f, is_active: e.target.checked }))}
+                  />
+                  <span>Active</span>
+                </label>
+                <label style={{ gridColumn: '1/-1' }}>
+                  <span>Notes</span>
+                  <input
+                    className="ad-input"
+                    value={templateForm.notes}
+                    onChange={e => setTemplateForm(f => ({ ...f, notes: e.target.value }))}
+                  />
+                </label>
+
+                <div style={{ gridColumn: '1/-1', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <span>Periods</span>
+                  {templateForm.periods.map((p, i) => (
+                    <div key={i} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <input className="ad-input" type="time" style={{ width: '110px' }}
+                        value={p.start_time} onChange={e => updatePeriodField(i, 'start_time', e.target.value)} />
+                      <input className="ad-input" type="time" style={{ width: '110px' }}
+                        value={p.end_time} onChange={e => updatePeriodField(i, 'end_time', e.target.value)} />
+                      <select className="ad-input" style={{ width: '130px' }}
+                        value={p.period_type} onChange={e => updatePeriodField(i, 'period_type', e.target.value)}>
+                        <option value="student">Student</option>
+                        <option value="staff">Staff</option>
+                        <option value="cleaning">Cleaning</option>
+                        <option value="lunch">Lunch</option>
+                      </select>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', flexDirection: 'row' }}>
+                        <input type="checkbox" checked={p.is_bookable}
+                          onChange={e => updatePeriodField(i, 'is_bookable', e.target.checked)} />
+                        <span style={{ fontSize: '13px' }}>Bookable</span>
+                      </label>
+                      <input className="ad-input" placeholder="Label" style={{ width: '140px' }}
+                        value={p.label} onChange={e => updatePeriodField(i, 'label', e.target.value)} />
+                      <button type="button" className="ad-btn-secondary" onClick={() => removePeriodRow(i)}
+                        disabled={templateForm.periods.length <= 1}>Remove</button>
+                    </div>
+                  ))}
+                  <button type="button" className="ad-btn-secondary" style={{ alignSelf: 'flex-start' }} onClick={addPeriodRow}>
+                    + Add period
+                  </button>
+                </div>
+
+                <div className="ad-btn-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
+                  <button className="ad-btn-primary" type="submit" disabled={templateFormLoading}>
+                    {templateFormLoading ? 'Saving…' : editingTemplateId ? 'Save changes' : 'Create template'}
+                  </button>
+                  <button className="ad-btn-secondary" type="button" onClick={cancelEditTemplate}>
+                    {editingTemplateId ? 'Cancel edit' : 'Reset'}
+                  </button>
+                </div>
+              </form>
             </div>
 
-            {adminLoading ? (
-              <p className="ad-empty">Loading schedule templates…</p>
-            ) : scheduleTemplates.length === 0 ? (
-              <p className="ad-empty">No schedule templates found.</p>
-            ) : (
-              <div className="ad-row-list">
-                {scheduleTemplates.map(t => (
-                  <div className="ad-row" key={t.id} style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-                      <div className="ad-row-main">
-                        <strong>{t.facility_name || t.sport}</strong>
-                        <p className="ad-row-sub">
-                          {t.sport} · {t.facility_scope === 'facility' ? 'Facility-specific' : 'Sport-level'} · {fmtStatus(t.day_type)}
-                        </p>
-                      </div>
-                      {t.is_active ? (
-                        <span className="ad-pill ad-pill-open">Active</span>
-                      ) : (
-                        <span className="ad-pill ad-pill-neutral">Inactive</span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                      {(t.periods || []).map((p, i) => (
-                        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '13px' }}>
-                          <span>{p.start_time}–{p.end_time}{p.label ? ` · ${p.label}` : ''}</span>
-                          <span style={{ display: 'flex', gap: '8px' }}>
-                            <span className="ad-row-sub">{fmtStatus(p.period_type)}</span>
-                            {p.is_bookable ? (
-                              <span className="ad-pill ad-pill-open">Bookable</span>
-                            ) : (
-                              <span className="ad-pill ad-pill-neutral">Non-bookable</span>
-                            )}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">RR campus templates</p>
+                <h2 className="ad-card-title">Schedule</h2>
               </div>
-            )}
-          </div>
+
+              {adminLoading ? (
+                <p className="ad-empty">Loading schedule templates…</p>
+              ) : scheduleTemplates.length === 0 ? (
+                <p className="ad-empty">No schedule templates found.</p>
+              ) : (
+                <div className="ad-row-list">
+                  {scheduleTemplates.map(t => (
+                    <div className="ad-row" key={t.id} style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                        <div className="ad-row-main">
+                          <strong>{t.facility_name || t.sport}</strong>
+                          <p className="ad-row-sub">
+                            {t.sport} · {t.facility_scope === 'facility' ? 'Facility-specific' : 'Sport-level'} · {fmtStatus(t.day_type)} · priority {t.priority}
+                          </p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          {t.is_active ? (
+                            <span className="ad-pill ad-pill-open">Active</span>
+                          ) : (
+                            <span className="ad-pill ad-pill-neutral">Inactive</span>
+                          )}
+                          <button className="ad-btn-secondary" type="button" onClick={() => startEditTemplate(t)}>Edit</button>
+                          <button className="ad-btn-secondary" type="button" onClick={() => handleToggleTemplateActive(t)}>
+                            {t.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                          <button className="ad-btn-danger" type="button" onClick={() => handleDeleteTemplate(t.id)}>Delete</button>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {(t.periods || []).map((p, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '13px' }}>
+                            <span>{p.start_time}–{p.end_time}{p.label ? ` · ${p.label}` : ''}</span>
+                            <span style={{ display: 'flex', gap: '8px' }}>
+                              <span className="ad-row-sub">{fmtStatus(p.period_type)}</span>
+                              {p.is_bookable ? (
+                                <span className="ad-pill ad-pill-open">Bookable</span>
+                              ) : (
+                                <span className="ad-pill ad-pill-neutral">Non-bookable</span>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {/* ── Slots ── */}
