@@ -262,6 +262,23 @@ async def unban_user(
     return success_response(data={"user_id": user_id}, message="Ban lifted")
 
 
+@router.get("/slots/{slot_id}/roster")
+async def get_slot_roster(
+    slot_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Admin-only: a slot's identity plus its full (active + historical)
+    participation roster, for occupancy/accountability purposes."""
+    try:
+        roster = await admin_service.get_slot_roster(db, slot_id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=roster, message="Slot roster fetched")
+
+
 @router.get("/facilities")
 async def get_facilities(
     campus: Literal["RR"] = Query(default="RR"),

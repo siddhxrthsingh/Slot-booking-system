@@ -4,6 +4,7 @@ Admin service: slot management, booking approvals, metrics.
 from datetime import datetime, timezone
 
 from bson import ObjectId
+from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.services.booking_service import _slot_end_dt
@@ -281,3 +282,67 @@ async def list_facilities(db: AsyncIOMotorDatabase, campus: str = "RR") -> list[
         }
         for f in facilities
     ]
+
+
+# ---------------------------------------------------------------------------
+# Slot roster / accountability (read-only, admin-only)
+# ---------------------------------------------------------------------------
+
+async def get_slot_roster(db: AsyncIOMotorDatabase, slot_id: str) -> dict:
+    """Return a slot's identity plus its full participation history.
+
+    Includes active AND cancelled bookings (history is preserved, never
+    deleted). Participant identity comes entirely from each booking's own
+    stored `user_snapshot` — the live `users` collection is never queried
+    here, since the snapshot is the historically-accurate accountability
+    record for that participation.
+    """
+    try:
+        slot_oid = ObjectId(slot_id)
+    except InvalidId as e:
+        # Normalize to ValueError, matching the ValueError -> 400 convention
+        # already used by the student booking router (routers/bookings.py).
+        raise ValueError(str(e)) from e
+
+    slot = await db["slots"].find_one({"_id": slot_oid})
+    if not slot:
+        raise LookupError("Slot not found.")
+
+    bookings = (
+        await db["bookings"]
+        .find({"slot_id": slot_oid})
+        .sort("joined_at", 1)
+        .to_list(length=500)
+    )
+
+    participants = [
+        {
+            "booking_id":    str(b["_id"]),
+            "user_id":       str(b["user_id"]),
+            "status":        b["status"],
+            "is_leader":     b.get("is_leader", False),
+            "joined_at":     b.get("joined_at"),
+            "cancelled_at":  b.get("cancelled_at"),
+            "cancelled_by":  str(b["cancelled_by"]) if b.get("cancelled_by") else None,
+            "user_snapshot": b.get("user_snapshot"),
+        }
+        for b in bookings
+    ]
+
+    return {
+        "slot": {
+            "id":            str(slot["_id"]),
+            "facility_id":   str(slot["facility_id"]) if slot.get("facility_id") else None,
+            "facility_name": slot.get("facility_name"),
+            "sport":         slot["sport"],
+            "date":          slot["date"],
+            "start_time":    slot["start_time"],
+            "end_time":      slot["end_time"],
+            "campus":        slot["campus"],
+            "capacity":      slot["capacity"],
+            "booked_count":  slot["booked_count"],
+            "status":        slot["status"],
+            "leader_user_id": str(slot["leader_user_id"]) if slot.get("leader_user_id") else None,
+        },
+        "participants": participants,
+    }
