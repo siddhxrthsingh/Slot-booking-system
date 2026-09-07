@@ -9,7 +9,7 @@ from app.database import get_db
 from app.dependencies import require_admin
 from app.schemas.booking import ApprovalAction
 from app.schemas.slot import SlotCreate
-from app.services import admin_service
+from app.services import admin_service, booking_service
 from app.utils import success_response
 from app.ws_manager import manager as ws_manager
 
@@ -145,31 +145,30 @@ async def admin_cancel_booking(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    """Admin force-cancel any active booking and release the seat."""
-    from bson import ObjectId
-    from datetime import datetime, timezone
+    """Admin force-cancel any active booking.
 
-    now = datetime.now(timezone.utc)
+    Reuses booking_service.cancel_booking — the same atomic capacity
+    release, leader-reassignment, and historical-preservation logic used
+    for student self-cancellation — with the admin recorded as the
+    cancelling actor (cancelled_by) instead of the booking's owner.
+    """
     booking = await db["bookings"].find_one({"_id": ObjectId(booking_id)})
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    if booking["status"] == "cancelled":
-        raise HTTPException(status_code=400, detail="Booking is already cancelled")
 
-    # Release the seat
-    await db["slots"].update_one(
-        {"_id": booking["slot_id"]},
-        {"$inc": {"booked_count": -1}, "$set": {"status": "open"}},
-    )
-    updated = await db["bookings"].find_one_and_update(
-        {"_id": ObjectId(booking_id)},
-        {"$set": {"status": "cancelled", "cancelled_at": now, "updated_at": now,
-                  "admin_cancelled": True, "approved_by": ObjectId(str(admin["_id"]))}},
-        return_document=True,
-    )
+    try:
+        updated = await booking_service.cancel_booking(
+            db, booking_id, str(booking["user_id"]),
+            actor_id=str(admin["_id"]), apply_late_ban=False,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     await ws_manager.broadcast("booking_cancelled", {"booking_id": booking_id, "sport": updated["sport"]})
     return success_response(
-        data={"booking_id": booking_id, "status": "cancelled"},
+        data={"booking_id": booking_id, "status": updated["status"]},
         message="Booking cancelled by admin",
     )
 

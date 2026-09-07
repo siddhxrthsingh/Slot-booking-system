@@ -338,8 +338,29 @@ async def cancel_booking(
     db: AsyncIOMotorDatabase,
     booking_id: str,
     user_id: str,
+    actor_id: str | None = None,
+    apply_late_ban: bool = True,
 ) -> dict:
-    """A student leaves their own active participation in a slot.
+    """Leave/cancel a participation in a slot.
+
+    `user_id` identifies the booking's owner (used for the ownership lookup,
+    exactly as before — this is what keeps a student from cancelling anyone
+    else's booking). `actor_id` identifies who is performing the
+    cancellation and is recorded as `cancelled_by`; it defaults to `user_id`
+    for the normal self-cancel path (student leaving their own slot), so
+    that behavior is unchanged. Admin-initiated force-cancellation passes
+    the admin's id as `actor_id` while still supplying the booking owner's
+    id as `user_id`, reusing this exact same safe logic — atomic capacity
+    release, leader reassignment, and historical preservation — instead of
+    duplicating it.
+
+    `apply_late_ban` controls whether a late cancellation applies the
+    student's ban. It defaults to True (student self-cancel keeps its
+    existing behavior unchanged). Admin-initiated force-cancellation passes
+    False — the `late_cancel` flag is still computed and stored for history,
+    but no ban is created, since a ban is a punitive consequence of the
+    student's own choice to cancel late, not of an admin cancelling on
+    their behalf.
 
     Only the leaving participant's booking record is affected — the shared
     slot and other participants' bookings are untouched beyond the capacity
@@ -348,6 +369,7 @@ async def cancel_booking(
     """
     booking_oid = ObjectId(booking_id)
     user_oid    = ObjectId(user_id)
+    actor_oid   = ObjectId(actor_id) if actor_id else user_oid
     now         = datetime.now(timezone.utc)
 
     booking = await db["bookings"].find_one({"_id": booking_oid, "user_id": user_oid})
@@ -374,7 +396,7 @@ async def cancel_booking(
         {"$set": {
             "status":       "cancelled",
             "cancelled_at": now,
-            "cancelled_by": user_oid,
+            "cancelled_by": actor_oid,
             "updated_at":   now,
             "late_cancel":  late_cancel,
         }},
@@ -383,7 +405,7 @@ async def cancel_booking(
     if not updated:
         raise ValueError("Booking is already cancelled.")
 
-    if late_cancel and slot:
+    if late_cancel and slot and apply_late_ban:
         slot_start = _slot_start_dt(slot)
         await apply_ban(
             db,
