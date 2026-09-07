@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from app.services.booking_service import create_booking
 
@@ -75,8 +76,11 @@ class FakeCursor:
 
 
 class FakeCollection:
-    def __init__(self, docs=None):
+    def __init__(self, docs=None, unique_keys=None):
         self.docs = list(docs or [])
+        # List of tuples of field names that must be unique together, e.g.
+        # [("user_id", "slot_id")] — mirrors the real `bookings` unique index.
+        self.unique_keys = unique_keys or []
 
     def find(self, query=None):
         query = query or {}
@@ -112,6 +116,14 @@ class FakeCollection:
         return
 
     async def insert_one(self, doc):
+        # Yield control so concurrent inserts racing on the same unique key
+        # can genuinely interleave, like two real Motor round-trips would.
+        await asyncio.sleep(0)
+        for keys in self.unique_keys:
+            key_values = tuple(doc.get(k) for k in keys)
+            for existing in self.docs:
+                if tuple(existing.get(k) for k in keys) == key_values:
+                    raise DuplicateKeyError("duplicate key")
         doc.setdefault("_id", ObjectId())
         self.docs.append(doc)
         return type("Result", (), {"inserted_id": doc["_id"]})()
@@ -132,7 +144,7 @@ class FakeDb:
     def __init__(self, slots=None, bookings=None, facilities=None, bans=None):
         self.collections = {
             "slots": FakeCollection(slots),
-            "bookings": FakeCollection(bookings),
+            "bookings": FakeCollection(bookings, unique_keys=[("user_id", "slot_id")]),
             "facilities": FakeCollection(facilities),
             "bans": FakeCollection(bans),
         }
@@ -321,6 +333,35 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             await create_booking(db, user=user, slot_id=str(slot3["_id"]))
         self.assertIn("active bookings on this day", str(ctx.exception))
+
+    async def test_concurrent_duplicate_join_by_same_user_does_not_double_book(self):
+        # Same user fires two join requests for the same slot at once (e.g. a
+        # double-click). The pre-check for an existing booking isn't atomic
+        # with the insert, so both requests can pass it before either
+        # inserts. The unique (user_id, slot_id) index must be the backstop:
+        # exactly one booking should survive and the reserved seat from the
+        # loser must be released, not leaked.
+        slot = make_slot(capacity=6, booked_count=0, status="open")
+        user = make_user()
+        db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)])
+
+        results = await asyncio.gather(
+            create_booking(db, user=user, slot_id=str(slot["_id"])),
+            create_booking(db, user=user, slot_id=str(slot["_id"])),
+            return_exceptions=True,
+        )
+
+        successes = [r for r in results if not isinstance(r, Exception)]
+        failures = [r for r in results if isinstance(r, Exception)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], ValueError)
+
+        active_bookings = [b for b in db["bookings"].docs if b["status"] != "cancelled"]
+        self.assertEqual(len(active_bookings), 1)
+        self.assertEqual(db["slots"].docs[0]["booked_count"], 1)
+        self.assertTrue(active_bookings[0]["is_leader"])
+        self.assertEqual(str(db["slots"].docs[0]["leader_user_id"]), str(user["_id"]))
 
     async def test_overlapping_active_bookings_rejected(self):
         date = future_date()

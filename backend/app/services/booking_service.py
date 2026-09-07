@@ -18,6 +18,7 @@ from typing import Literal
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.config import get_settings
 
@@ -284,7 +285,30 @@ async def create_booking(
         "updated_at":   now,
     }
 
-    result = await db["bookings"].insert_one(booking_doc)
+    try:
+        result = await db["bookings"].insert_one(booking_doc)
+    except DuplicateKeyError:
+        # A concurrent request for this same user+slot won the race and
+        # already inserted the booking (the pre-check above is not atomic
+        # with the insert). Roll back the seat this attempt reserved so
+        # booked_count reflects only the one surviving booking.
+        released_slot = await db["slots"].find_one_and_update(
+            {"_id": slot_oid, "booked_count": {"$gt": 0}},
+            {"$inc": {"booked_count": -1}},
+            return_document=True,
+        )
+        if released_slot and released_slot.get("status") == "full" and released_slot["booked_count"] < capacity:
+            await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "open"}})
+        if is_leader:
+            # The surviving booking belongs to this same user, so
+            # leader_user_id is still correct — just make sure that
+            # surviving record itself is flagged as leader.
+            await db["bookings"].update_one(
+                {"user_id": user_oid, "slot_id": slot_oid, "status": {"$ne": "cancelled"}},
+                {"$set": {"is_leader": True}},
+            )
+        raise ValueError("You have already joined this slot.")
+
     booking_doc["_id"] = result.inserted_id
     return booking_doc
 

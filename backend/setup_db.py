@@ -59,6 +59,10 @@ async def main():
     print("  ✓ slots indexes")
 
     # Bookings
+    # A user may have at most one booking document per slot, ever (rejoin
+    # after leaving is blocked by product rule) — this also closes the
+    # concurrent-duplicate-join race at the database layer.
+    await db["bookings"].create_index([("user_id", 1), ("slot_id", 1)], unique=True)
     await db["bookings"].create_index([("user_id", 1), ("status", 1)])
     await db["bookings"].create_index([("slot_id", 1), ("status", 1)])
     await db["bookings"].create_index("status")
