@@ -7,7 +7,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.services.booking_service import _slot_end_dt, _slot_start_dt
+from app.services.booking_service import _slot_end_dt, _slot_start_dt, cancel_booking
 
 
 def _filter_active_slots(slots: list[dict], now: datetime | None = None) -> list[dict]:
@@ -238,17 +238,42 @@ async def update_manual_slot(
     return updated
 
 
-async def cancel_slot(db: AsyncIOMotorDatabase, slot_id: str) -> int:
-    """Cancel a slot and cascade-cancel all non-cancelled bookings."""
+async def cancel_slot(db: AsyncIOMotorDatabase, slot_id: str, admin_id: str) -> int:
+    """Cancel a slot (manual or generated): the slot itself is marked
+    cancelled — never deleted — and every active participation is cancelled
+    through booking_service.cancel_booking, the same safe, historically-
+    preserving logic used for individual cancellations. This keeps
+    cancelled_by, cancelled_at, and leader bookkeeping consistent instead of
+    stranding them via a bulk field update, and never applies the student
+    late-cancellation ban since this is an admin action.
+    """
     slot_oid = ObjectId(slot_id)
+    slot = await db["slots"].find_one({"_id": slot_oid})
+    if not slot:
+        raise LookupError("Slot not found.")
+
+    # Mark the slot cancelled up front. cancel_booking's per-booking capacity
+    # release reopens a slot only when its status was "full" — cancelling
+    # the slot first prevents that from firing mid-loop.
     await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "cancelled"}})
 
-    now = datetime.now(timezone.utc)
-    result = await db["bookings"].update_many(
-        {"slot_id": slot_oid, "status": {"$ne": "cancelled"}},
-        {"$set": {"status": "cancelled", "cancelled_at": now, "updated_at": now}},
-    )
-    return result.modified_count
+    active_bookings = await db["bookings"].find(
+        {"slot_id": slot_oid, "status": {"$ne": "cancelled"}}
+    ).to_list(length=500)
+
+    cancelled_count = 0
+    for booking in active_bookings:
+        try:
+            await cancel_booking(
+                db, str(booking["_id"]), str(booking["user_id"]),
+                actor_id=admin_id, apply_late_ban=False,
+            )
+            cancelled_count += 1
+        except ValueError:
+            # Already cancelled (e.g. a concurrent request) — not fatal here.
+            continue
+
+    return cancelled_count
 
 
 # ---------------------------------------------------------------------------

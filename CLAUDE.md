@@ -1212,6 +1212,46 @@ Do not provide a long explanation unless requested.
 
 
 
+\## Token-Efficient Claude Workflow
+
+
+
+\- Keep implementation work narrowly scoped to the requested feature.
+
+\- Do not inspect the whole repository or reread unrelated files.
+
+\- Do not re-read CLAUDE.md sections repeatedly once the relevant rule is known.
+
+\- Do not perform broad architectural reviews unless explicitly requested.
+
+\- Do not run full test suites after every change; run only focused tests for the changed behavior.
+
+\- Do not run lint/build unless the changed files make them relevant or the task explicitly requests them.
+
+\- Do not produce lengthy implementation reports; report only files changed, focused test result, and important blockers.
+
+\- Do not proactively refactor, clean up, rename, or improve unrelated code.
+
+\- Do not create extra documentation unless explicitly requested.
+
+\- Prefer modifying existing code paths over introducing abstractions.
+
+\- When requirements are already established in CLAUDE.md, follow them directly instead of rediscovering them from the repository.
+
+\- Do not use Claude for Git commit/push operations; the developer handles Git.
+
+\- At checkpoints, do not perform another review unless there is evidence of a problem.
+
+
+
+Minimize context reading and tool usage. Correctness is required, but unnecessary inspection and verification are not.
+
+
+
+\---
+
+
+
 \## 14. Important "Do Not" Rules
 
 

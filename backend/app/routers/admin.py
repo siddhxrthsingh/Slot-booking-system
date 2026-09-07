@@ -121,7 +121,10 @@ async def cancel_slot(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    affected = await admin_service.cancel_slot(db, slot_id)
+    try:
+        affected = await admin_service.cancel_slot(db, slot_id, str(admin["_id"]))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     await ws_manager.broadcast("slot_cancelled", {
         "slot_id":           slot_id,
         "bookings_cancelled": affected,
