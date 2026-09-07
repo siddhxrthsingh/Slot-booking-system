@@ -24,18 +24,6 @@ import {
   getAdminSlots,
 } from '../api/admin';
 
-// ── Sport metadata ────────────────────────────────────────────────────────────
-const SPORT_META = {
-  Football:       { image: '/images/football-hero.jpg', accent: 'Evening practice blocks and inter-department matches.' },
-  Basketball:     { image: '/images/basketball.jpg',    accent: 'Quick drills, team scrims, and PE activity bookings.' },
-  Cricket:        { image: '/images/cricket.jpg',       accent: 'Net sessions, bowling drills, and team trials access.' },
-  Badminton:      { image: '/images/badminton.jpg',     accent: 'Singles and doubles court sessions for all skill levels.' },
-  Volleyball:     { image: '/images/volleyball.jpg',    accent: 'Team practice sessions and inter-department tournaments.' },
-  Squash:         { image: '/images/squash.jpg',        accent: 'Booked court sessions with equipment provided on site.' },
-  'Table Tennis': { image: '/images/table-tennis.jpg',  accent: 'Competitive and casual table sessions in the indoor hall.' },
-  Chess:          { image: '/images/chess.jpg',         accent: 'Strategy board game sessions and inter-college practice.' },
-};
-
 const announcements = [
   'Inter-college football selections begin this month.',
   'Basketball court B will be under maintenance on Sunday morning.',
@@ -93,9 +81,9 @@ export default function Dashboard() {
   const [toast,            setToast]            = useState(null);
   const [banInfo,          setBanInfo]          = useState(null);
 
-  // Student filters
-  const [filterCampus, setFilterCampus] = useState('');
-  const [filterSport,  setFilterSport]  = useState('');
+  // Student filters (RR only for now; sport options are derived from the
+  // facility-aware slot data returned by the backend, not hardcoded)
+  const [filterSport, setFilterSport] = useState('');
 
   // ── Admin state ───────────────────────────────────────────────────────────
   const [metrics,           setMetrics]           = useState(null);
@@ -130,17 +118,17 @@ export default function Dashboard() {
   const fetchSlots = useCallback(async () => {
     setSlotsLoading(true);
     try {
-      const params = {};
-      if (filterCampus) params.campus = filterCampus;
-      if (filterSport)  params.sport  = filterSport;
-      const data = await getAvailableSlots(params);
+      // RR only for now — sport filtering happens client-side (below) so the
+      // filter dropdown's option list can be derived from the full set of
+      // facilities/sports the backend actually returns.
+      const data = await getAvailableSlots({ campus: 'RR' });
       setSlots(data);
     } catch {
       showToast('Failed to load available slots.', false);
     } finally {
       setSlotsLoading(false);
     }
-  }, [filterCampus, filterSport]);
+  }, []);
 
   const fetchMyBookings = useCallback(async () => {
     setBookingsLoading(true);
@@ -373,15 +361,37 @@ export default function Dashboard() {
   }
 
   // ── Derived data ──────────────────────────────────────────────────────────
-  const slotsBySport = slots.reduce((acc, s) => {
-    if (!acc[s.sport]) acc[s.sport] = [];
-    acc[s.sport].push(s);
-    return acc;
-  }, {});
+  // Sport filter options come from whatever the backend actually returned —
+  // never a hardcoded sport list. RR only for now.
+  const availableSports = [...new Set(slots.map(s => s.sport))].sort();
 
-  const displayedSports = filterSport
-    ? SPORTS_LIST.filter(s => s === filterSport)
-    : SPORTS_LIST;
+  const visibleSlots = filterSport ? slots.filter(s => s.sport === filterSport) : slots;
+
+  // Group by individual facility (not just by sport) using facility_id from
+  // the facility-aware API response, falling back to facility_name for any
+  // legacy/manual slot that predates facility linkage.
+  const facilityGroups = Object.values(
+    visibleSlots.reduce((acc, s) => {
+      const key = s.facility_id || `${s.sport}::${s.facility_name || s.venue}`;
+      if (!acc[key]) {
+        acc[key] = {
+          key,
+          facilityName: s.facility_name || s.venue || 'Unknown facility',
+          sport: s.sport,
+          slots: [],
+        };
+      }
+      acc[key].slots.push(s);
+      return acc;
+    }, {})
+  ).map(group => ({
+    ...group,
+    slots: group.slots.slice().sort((a, b) => {
+      const dateCmp = new Date(a.date) - new Date(b.date);
+      if (dateCmp !== 0) return dateCmp;
+      return a.start_time.localeCompare(b.start_time);
+    }),
+  })).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
 
   const metricCards = metrics
     ? [
@@ -508,77 +518,90 @@ export default function Dashboard() {
           {/* Filters */}
           <section style={{ marginBottom: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
             <p className="eyebrow" style={{ margin: 0, marginRight: '4px' }}>Filter:</p>
-            <select style={{ ...inp, width: 'auto', padding: '10px 16px' }} value={filterCampus} onChange={e => setFilterCampus(e.target.value)}>
-              <option value="">All Campuses</option>
-              {CAMPUSES.map(c => <option key={c} value={c}>{c} Campus</option>)}
-            </select>
+            <span className="slot-pill" style={{ padding: '10px 16px' }}>RR Campus</span>
             <select style={{ ...inp, width: 'auto', padding: '10px 16px' }} value={filterSport} onChange={e => setFilterSport(e.target.value)}>
               <option value="">All Sports</option>
-              {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
+              {availableSports.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {(filterCampus || filterSport) && (
-              <button className="secondary-button" type="button" style={{ padding: '10px 16px' }} onClick={() => { setFilterCampus(''); setFilterSport(''); }}>
+            {filterSport && (
+              <button className="secondary-button" type="button" style={{ padding: '10px 16px' }} onClick={() => setFilterSport('')}>
                 Clear
               </button>
             )}
           </section>
 
-          {/* Sports Cards */}
+          {/* Facility Cards */}
           <section className="sports-section">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">Available Sports</p>
-                <h2>View and book slots by sport</h2>
+                <p className="eyebrow">Available Facilities</p>
+                <h2>View and book slots by facility</h2>
               </div>
               <p className="section-copy">Live slot counts. Auto-confirmed on booking.</p>
             </div>
 
             {slotsLoading ? (
               <p style={{ color: '#cbd5ff', textAlign: 'center', padding: '40px 0' }}>Loading slots…</p>
+            ) : facilityGroups.length === 0 ? (
+              <p style={{ color: '#cbd5ff', textAlign: 'center', padding: '40px 0' }}>No slots available.</p>
             ) : (
               <div className="sports-grid">
-                {displayedSports.map((sportName) => {
-                  const sportSlots  = (slotsBySport[sportName] || []).slice().sort((a, b) => {
-                    const dateCmp = new Date(a.date) - new Date(b.date);
-                    if (dateCmp !== 0) return dateCmp;
-                    return a.start_time.localeCompare(b.start_time);
-                  });
-                  const totalAvail  = sportSlots.reduce((s, sl) => s + sl.available_count, 0);
-                  const meta        = SPORT_META[sportName] || { image: '', accent: '' };
-                  const nextSlot    = sportSlots[0];
+                {facilityGroups.map((group) => {
+                  const totalAvail = group.slots.reduce((s, sl) => s + sl.available_count, 0);
                   return (
-                    <article className="sport-card" key={sportName}>
-                      <div className="sport-image-wrap">
-                        <img className="sport-image" src={meta.image} alt={sportName} />
-                        <span className="sport-badge">
-                          {totalAvail > 0 ? `${totalAvail} seats available` : 'No slots today'}
-                        </span>
-                      </div>
+                    <article className="sport-card" key={group.key}>
                       <div className="sport-content">
                         <div className="sport-header">
                           <div>
-                            <h3>{sportName}</h3>
-                            <p className="venue">{nextSlot?.venue || '—'}</p>
+                            <h3>{group.facilityName}</h3>
+                            <p className="venue">{group.sport}</p>
                           </div>
-                          {nextSlot && <span className="slot-pill">{nextSlot.start_time}–{nextSlot.end_time}</span>}
+                          <span className="sport-badge" style={{ position: 'static' }}>
+                            {totalAvail > 0 ? `${totalAvail} seats available` : 'No seats available'}
+                          </span>
                         </div>
-                        <p className="sport-accent">{meta.accent}</p>
-                        {sportSlots.length > 0 ? (
+                        {group.slots.length > 0 ? (
                           <div style={{ display: 'grid', gap: '8px' }}>
-                            {sportSlots.slice(0, 3).map((sl) => (
-                              <button
-                                key={sl.id}
-                                className="primary-button"
-                                type="button"
-                                disabled={!!banInfo || bookingInProgress === sl.id || sl.available_count === 0}
-                                onClick={() => handleBook(sl.id)}
-                                style={{ fontSize: '0.9rem', padding: '11px 14px' }}
-                              >
-                                {bookingInProgress === sl.id
-                                  ? 'Booking…'
-                                  : `Book — ${sl.start_time}–${sl.end_time} (${sl.available_count} left)`}
-                              </button>
-                            ))}
+                            {group.slots.map((sl) => {
+                              const isFull = sl.status === 'full' || sl.available_count === 0;
+                              return (
+                                <div
+                                  key={sl.id}
+                                  style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                    gap: '10px', padding: '10px 12px', borderRadius: '12px',
+                                    background: 'rgba(7,10,20,0.6)', border: '1px solid rgba(167,139,250,0.14)',
+                                  }}
+                                >
+                                  <div>
+                                    <span className="slot-pill">{sl.start_time}–{sl.end_time}</span>
+                                    <p style={{ margin: '6px 0 0', fontSize: '0.78rem', color: '#8899cc' }}>
+                                      {sl.booked_count}/{sl.capacity} booked · {sl.available_count} available
+                                    </p>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <span
+                                      className="status-chip"
+                                      style={{
+                                        background: isFull ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
+                                        color: isFull ? '#f87171' : '#4ade80',
+                                      }}
+                                    >
+                                      {isFull ? 'Full' : 'Open'}
+                                    </span>
+                                    <button
+                                      className="primary-button"
+                                      type="button"
+                                      disabled={!!banInfo || bookingInProgress === sl.id || isFull}
+                                      onClick={() => handleBook(sl.id)}
+                                      style={{ fontSize: '0.85rem', padding: '9px 14px' }}
+                                    >
+                                      {bookingInProgress === sl.id ? 'Booking…' : 'Book'}
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         ) : (
                           <button className="secondary-button" type="button" disabled>No slots available</button>
