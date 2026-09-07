@@ -36,7 +36,7 @@ async def create_booking(
     try:
         booking = await booking_service.create_booking(
             db,
-            user_id=str(current_user["_id"]),
+            user=current_user,
             slot_id=body.slot_id,
             notes=body.notes,
         )
@@ -71,6 +71,7 @@ async def create_booking(
             "status":     booking["status"],
             "sport":      booking["sport"],
             "slot_id":    str(booking["slot_id"]),
+            "is_leader":  booking.get("is_leader", False),
         },
         message="Booking confirmed successfully",
     )

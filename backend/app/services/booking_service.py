@@ -1,13 +1,17 @@
 """
-Booking service: availability checks, create/cancel bookings, quota + policy enforcement.
+Booking service: availability checks, join/cancel bookings, quota + policy enforcement.
 
-Policy:
-  - All bookings auto-confirmed (no manual approval flow).
-  - 1 booking per sport per day per student.
-  - No time-clash: a student cannot hold two bookings at the same time.
-  - Cancellation must happen >= CANCEL_WINDOW_HOURS before slot start.
-  - Late cancellation (< window) → apply a BAN_DURATION_DAYS ban.
+Join policy (Phase 3 Step 1B):
+  - Facility capacity is authoritative; capacity check/increment is atomic.
+  - Multiple students may join the same slot (shared slots).
+  - First active participant becomes the leader (leader_user_id / is_leader).
+  - A user cannot hold two ACTIVE participations in the same slot.
+  - A user who has previously left/cancelled a slot cannot rejoin it.
+  - Maximum 2 ACTIVE slots per calendar day per student, across all sports/facilities.
+  - Active bookings for the same student must not overlap in time.
   - Banned students cannot make new bookings until the ban expires.
+
+Cancellation/leave behavior is out of scope for this step and remains as before.
 """
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -32,9 +36,27 @@ def _slot_start_dt(slot: dict) -> datetime:
 
 
 def _slot_end_dt(slot: dict) -> datetime:
+    """End of the slot. Prefers start_time + duration_minutes (supports arbitrary-duration
+    manual slots); falls back to end_time when duration_minutes is not set."""
+    duration = slot.get("duration_minutes")
+    if duration:
+        return _slot_start_dt(slot) + timedelta(minutes=duration)
     d: datetime = slot["date"]
     h, m = map(int, slot["end_time"].split(":"))
     return d.replace(hour=h, minute=m, second=0, microsecond=0, tzinfo=timezone.utc)
+
+
+def _build_user_snapshot(user: dict) -> dict:
+    return {
+        "name": user.get("name"),
+        "srn": user.get("srn"),
+        "phone": user.get("phone"),
+        "branch": user.get("branch"),
+        "program": user.get("program"),
+        "semester": user.get("semester"),
+        "section": user.get("section"),
+        "campus": user.get("campus"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -127,17 +149,26 @@ async def list_available_slots(
 
 
 # ---------------------------------------------------------------------------
-# Create booking
+# Join slot (create participation record)
 # ---------------------------------------------------------------------------
+
+MAX_ACTIVE_SLOTS_PER_DAY = 2
+
 
 async def create_booking(
     db: AsyncIOMotorDatabase,
-    user_id: str,
+    user: dict,
     slot_id: str,
     notes: str | None = None,
 ) -> dict:
+    """Join a slot as a participant.
+
+    `user` is the authenticated user document (must contain at least `_id`;
+    name/srn/phone/branch/program/semester/section/campus are used for the
+    historical user_snapshot).
+    """
     slot_oid = ObjectId(slot_id)
-    user_oid = ObjectId(user_id)
+    user_oid = ObjectId(str(user["_id"]))
     now      = datetime.now(timezone.utc)
 
     # ── Ban check ────────────────────────────────────────────────────────────
@@ -154,37 +185,36 @@ async def create_booking(
     slot_start = _slot_start_dt(slot)
     slot_end   = _slot_end_dt(slot)
 
-    # ── Duplicate check ──────────────────────────────────────────────────────
-    existing = await db["bookings"].find_one(
-        {"user_id": user_oid, "slot_id": slot_oid, "status": {"$ne": "cancelled"}}
-    )
-    if existing:
-        raise ValueError("You already have a booking for this slot.")
+    # ── Duplicate active participation / rejoin-after-leaving check ─────────
+    prior = await db["bookings"].find_one({"user_id": user_oid, "slot_id": slot_oid})
+    if prior:
+        if prior["status"] != "cancelled":
+            raise ValueError("You have already joined this slot.")
+        raise ValueError("You have already left this slot and cannot rejoin it.")
 
-    # ── 1 booking per sport per day ──────────────────────────────────────────
+    # ── Maximum 2 ACTIVE slots per calendar day (all sports/facilities) ─────
     day_start = slot_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end   = slot_start.replace(hour=23, minute=59, second=59)
+    day_end   = slot_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     same_day_slots = await db["slots"].find(
-        {"sport": slot["sport"], "date": {"$gte": day_start, "$lte": day_end}}
-    ).to_list(length=100)
+        {"date": {"$gte": day_start, "$lte": day_end}}
+    ).to_list(length=500)
     same_day_slot_ids = [s["_id"] for s in same_day_slots]
 
-    same_day_booking = await db["bookings"].find_one({
+    active_same_day_count = await db["bookings"].find({
         "user_id": user_oid,
         "slot_id": {"$in": same_day_slot_ids},
-        "status":  {"$nin": ["cancelled"]},
-    })
-    if same_day_booking:
+        "status":  {"$ne": "cancelled"},
+    }).to_list(length=MAX_ACTIVE_SLOTS_PER_DAY + 1)
+    if len(active_same_day_count) >= MAX_ACTIVE_SLOTS_PER_DAY:
         raise ValueError(
-            f"You already have a {slot['sport']} booking on this day. "
-            "Only 1 booking per sport per day is allowed."
+            f"You already have {MAX_ACTIVE_SLOTS_PER_DAY} active bookings on this day. "
+            f"Maximum {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day is allowed."
         )
 
-    # ── Time-clash check ─────────────────────────────────────────────────────
-    # Find all non-cancelled bookings for this user, enrich with slot times
+    # ── Overlap check across all active bookings (any day/sport) ────────────
     active_bookings = await db["bookings"].find(
-        {"user_id": user_oid, "status": {"$nin": ["cancelled"]}}
+        {"user_id": user_oid, "status": {"$ne": "cancelled"}}
     ).to_list(length=200)
 
     for ab in active_bookings:
@@ -198,15 +228,22 @@ async def create_booking(
             raise ValueError(
                 f"Time clash with your existing {ab['sport']} booking "
                 f"({ab_slot['start_time']}–{ab_slot['end_time']}). "
-                "You cannot book two sports at the same time."
+                "You cannot hold overlapping bookings."
             )
+
+    # ── Facility capacity is authoritative ───────────────────────────────────
+    capacity = slot["capacity"]
+    if slot.get("facility_id"):
+        facility = await db["facilities"].find_one({"_id": ObjectId(str(slot["facility_id"]))})
+        if facility and facility.get("capacity") is not None:
+            capacity = facility["capacity"]
 
     # ── Atomic seat reservation ──────────────────────────────────────────────
     updated_slot = await db["slots"].find_one_and_update(
         {
             "_id":    slot_oid,
             "status": "open",
-            "$expr":  {"$lt": ["$booked_count", "$capacity"]},
+            "$expr":  {"$lt": ["$booked_count", capacity]},
         },
         {"$inc": {"booked_count": 1}},
         return_document=True,
@@ -214,17 +251,33 @@ async def create_booking(
     if not updated_slot:
         raise ValueError("Slot is full or no longer available.")
 
-    if updated_slot["booked_count"] >= updated_slot["capacity"]:
+    if updated_slot["booked_count"] >= capacity:
         await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "full"}})
 
-    # Auto-confirm all bookings
+    # ── Leader assignment: the request that atomically took booked_count from
+    # 0 → 1 is the first successful participant, so it becomes leader. Since
+    # the increment above is atomic and MongoDB serializes per-document
+    # updates, `booked_count == 1` can be true for exactly one caller across
+    # the whole system — no separate race-prone claim step is needed.
+    is_leader = updated_slot["booked_count"] == 1
+    if is_leader:
+        await db["slots"].update_one(
+            {"_id": slot_oid}, {"$set": {"leader_user_id": user_oid}}
+        )
+
+    # ── Create participation record ──────────────────────────────────────────
     booking_doc = {
         "user_id":      user_oid,
         "slot_id":      slot_oid,
+        "facility_id":  ObjectId(str(slot["facility_id"])) if slot.get("facility_id") else None,
         "sport":        slot["sport"],
         "status":       "confirmed",
         "booking_date": now,
+        "joined_at":    now,
         "cancelled_at": None,
+        "cancelled_by": None,
+        "is_leader":    is_leader,
+        "user_snapshot": _build_user_snapshot(user),
         "notes":        notes,
         "approved_by":  None,
         "created_at":   now,
