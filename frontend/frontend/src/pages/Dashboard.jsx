@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useOccupancySocket } from '../hooks/useOccupancySocket';
 import {
   getAvailableSlots,
   createBooking,
@@ -270,6 +271,27 @@ export default function Dashboard() {
   }, [fetchSlots, fetchMyBookings, fetchAdminData, activePortal, isAdmin]);
 
   useWebSocket(handleWsMessage, true);
+
+  // ── Live occupancy updates (student portal only) ─────────────────────────
+  // Subscribes to exactly the slot IDs currently displayed, so join/leave
+  // events elsewhere update booked_count/available_count/status in place
+  // without a full slot refetch.
+  const displayedSlotIds = useMemo(() => slots.map((s) => s.id), [slots]);
+
+  const handleOccupancyUpdate = useCallback((data) => {
+    setSlots((prev) => prev.map((s) => (
+      s.id === data.slot_id
+        ? {
+            ...s,
+            booked_count:    data.booked_count ?? s.booked_count,
+            available_count: data.available_count ?? s.available_count,
+            status:          data.status ?? s.status,
+          }
+        : s
+    )));
+  }, []);
+
+  useOccupancySocket(displayedSlotIds, handleOccupancyUpdate, activePortal === 'student');
 
   // ── Student actions ───────────────────────────────────────────────────────
   async function handleBook(slotId) {
