@@ -331,7 +331,7 @@ async def get_user_bookings(
 
 
 # ---------------------------------------------------------------------------
-# Cancel booking
+# Cancel booking (leave a slot — per-participant, not a slot-wide cancellation)
 # ---------------------------------------------------------------------------
 
 async def cancel_booking(
@@ -339,8 +339,16 @@ async def cancel_booking(
     booking_id: str,
     user_id: str,
 ) -> dict:
+    """A student leaves their own active participation in a slot.
+
+    Only the leaving participant's booking record is affected — the shared
+    slot and other participants' bookings are untouched beyond the capacity
+    count and (if the leaver was leader) leader promotion. The booking record
+    is never deleted; it is preserved with status="cancelled" for history.
+    """
     booking_oid = ObjectId(booking_id)
     user_oid    = ObjectId(user_id)
+    now         = datetime.now(timezone.utc)
 
     booking = await db["bookings"].find_one({"_id": booking_oid, "user_id": user_oid})
     if not booking:
@@ -349,37 +357,93 @@ async def cancel_booking(
         raise ValueError("Booking is already cancelled.")
 
     slot = await db["slots"].find_one({"_id": booking["slot_id"]})
-    now  = datetime.now(timezone.utc)
 
     late_cancel = False
     if slot:
         slot_start = _slot_start_dt(slot)
         hours_until = (slot_start - now).total_seconds() / 3600
-        if hours_until < settings.cancel_window_hours:
-            late_cancel = True
-            # Apply ban for late cancellation
-            await apply_ban(
-                db,
-                user_oid,
-                f"Late cancellation of {slot['sport']} slot on "
-                f"{slot_start.strftime('%d %b %Y %H:%M')} UTC.",
-            )
+        late_cancel = hours_until < settings.cancel_window_hours
 
-    # Release the seat
-    if slot:
-        await db["slots"].update_one(
-            {"_id": booking["slot_id"]},
-            {"$inc": {"booked_count": -1}, "$set": {"status": "open"}},
-        )
-
+    # ── Atomic, idempotent status transition ─────────────────────────────────
+    # Guarding on status != "cancelled" here (not just the earlier read) makes
+    # this safe against duplicate/concurrent cancellation requests for the
+    # same booking: only the caller that actually flips the status proceeds
+    # to apply the ban / decrement the slot / promote a new leader.
     updated = await db["bookings"].find_one_and_update(
-        {"_id": booking_oid},
+        {"_id": booking_oid, "user_id": user_oid, "status": {"$ne": "cancelled"}},
         {"$set": {
             "status":       "cancelled",
             "cancelled_at": now,
+            "cancelled_by": user_oid,
             "updated_at":   now,
             "late_cancel":  late_cancel,
         }},
         return_document=True,
     )
+    if not updated:
+        raise ValueError("Booking is already cancelled.")
+
+    if late_cancel and slot:
+        slot_start = _slot_start_dt(slot)
+        await apply_ban(
+            db,
+            user_oid,
+            f"Late cancellation of {slot['sport']} slot on "
+            f"{slot_start.strftime('%d %b %Y %H:%M')} UTC.",
+        )
+
+    if slot:
+        # ── Atomic seat release, guarded against going negative ─────────────
+        released_slot = await db["slots"].find_one_and_update(
+            {"_id": slot["_id"], "booked_count": {"$gt": 0}},
+            {"$inc": {"booked_count": -1}},
+            return_document=True,
+        )
+        if released_slot:
+            capacity = released_slot.get("capacity")
+            if released_slot.get("facility_id"):
+                facility = await db["facilities"].find_one(
+                    {"_id": ObjectId(str(released_slot["facility_id"]))}
+                )
+                if facility and facility.get("capacity") is not None:
+                    capacity = facility["capacity"]
+            if released_slot.get("status") == "full" and released_slot["booked_count"] < capacity:
+                await db["slots"].update_one({"_id": slot["_id"]}, {"$set": {"status": "open"}})
+
+        # ── Leader promotion: earliest joined remaining active participant ──
+        # The promotion write is guarded by status != "cancelled" so a
+        # candidate who is concurrently leaving between selection and write
+        # can never be promoted. If that guard fails (candidate cancelled in
+        # the meantime), the remaining active participants are re-read and
+        # the next earliest candidate is tried, until one is promoted or none
+        # remain.
+        if updated.get("is_leader"):
+            new_leader_user_id = None
+            excluded_ids = set()
+            while True:
+                remaining = await db["bookings"].find({
+                    "slot_id": slot["_id"],
+                    "status": {"$ne": "cancelled"},
+                    "_id": {"$nin": list(excluded_ids)},
+                }).sort("joined_at", 1).to_list(length=1)
+                if not remaining:
+                    break
+
+                candidate = remaining[0]
+                promoted = await db["bookings"].find_one_and_update(
+                    {"_id": candidate["_id"], "status": {"$ne": "cancelled"}},
+                    {"$set": {"is_leader": True}},
+                    return_document=True,
+                )
+                if promoted:
+                    new_leader_user_id = promoted["user_id"]
+                    break
+
+                # Candidate was cancelled concurrently — exclude and retry.
+                excluded_ids.add(candidate["_id"])
+
+            await db["slots"].update_one(
+                {"_id": slot["_id"]}, {"$set": {"leader_user_id": new_leader_user_id}}
+            )
+
     return updated

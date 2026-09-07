@@ -61,7 +61,13 @@ class FakeCursor:
     def __init__(self, docs):
         self.docs = list(docs)
 
-    def sort(self, sort_spec):
+    def sort(self, key_or_list, direction=None):
+        if isinstance(key_or_list, str):
+            reverse = (direction if direction is not None else 1) < 0
+            self.docs.sort(key=lambda d: d.get(key_or_list), reverse=reverse)
+        else:
+            for key, dir_ in reversed(key_or_list):
+                self.docs.sort(key=lambda d: d.get(key), reverse=dir_ < 0)
         return self
 
     async def to_list(self, length):
@@ -93,11 +99,16 @@ class FakeCollection:
                 return doc
         return None
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, upsert=False):
         for doc in self.docs:
             if matches(doc, query):
                 _apply_update(doc, update)
                 return
+        if upsert:
+            new_doc = {}
+            _apply_update(new_doc, update)
+            new_doc.setdefault("_id", ObjectId())
+            self.docs.append(new_doc)
         return
 
     async def insert_one(self, doc):
