@@ -6,6 +6,7 @@ from app.services.admin_service import (
     create_schedule_template,
     update_schedule_template,
     delete_schedule_template,
+    list_schedule_templates,
 )
 from app.schemas.schedule_template import ScheduleTemplateCreate, ScheduleTemplateUpdate
 from app.routers import admin as admin_router
@@ -46,6 +47,21 @@ class _FakeCollection:
                 del self.docs[i]
                 return type("Result", (), {"deleted_count": 1})()
         return type("Result", (), {"deleted_count": 0})()
+
+    def find(self, query):
+        matched = [d for d in self.docs if all(d.get(k) == v for k, v in query.items())]
+        return _FakeCursor(matched)
+
+
+class _FakeCursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def sort(self, *args, **kwargs):
+        return self
+
+    async def to_list(self, length=None):
+        return self.docs
 
 
 class _FakeDb:
@@ -214,6 +230,31 @@ class ScheduleTemplateCrudTests(unittest.IsolatedAsyncioTestCase):
         db = _FakeDb()
         with self.assertRaises(LookupError):
             await delete_schedule_template(db, str(ObjectId()))
+
+    async def test_list_schedule_templates_returns_json_serializable_ids(self):
+        """Regression test: list_schedule_templates previously returned raw
+        ObjectId values for facility_id/created_by, which FastAPI's
+        jsonable_encoder cannot serialize — this crashed GET
+        /admin/schedule-templates with a 500, which is what broke the admin
+        dashboard's Promise.all(...) data load."""
+        facility = make_facility()
+        db = _FakeDb(facilities=[facility])
+        admin_id = str(ObjectId())
+        await create_schedule_template(
+            db,
+            ScheduleTemplateCreate(**sport_level_payload(
+                facility_scope="facility", facility_id=str(facility["_id"]),
+            )).model_dump(),
+            admin_id,
+        )
+
+        templates = await list_schedule_templates(db, "RR")
+
+        self.assertEqual(len(templates), 1)
+        self.assertIsInstance(templates[0]["facility_id"], str)
+        self.assertIsInstance(templates[0]["created_by"], str)
+        self.assertEqual(templates[0]["facility_id"], str(facility["_id"]))
+        self.assertEqual(templates[0]["created_by"], admin_id)
 
 
 class ScheduleTemplateRouterAuthTests(unittest.TestCase):

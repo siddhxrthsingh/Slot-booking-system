@@ -333,6 +333,31 @@ export default function Dashboard() {
 
   useOccupancySocket(displayedSlotIds, handleOccupancyUpdate, activePortal === 'student');
 
+  // ── Live occupancy updates (admin portal, Slots tab) ──────────────────────
+  // Subscribes to exactly the admin slot IDs currently displayed, so
+  // join/leave events elsewhere patch booked_count/available_count/status in
+  // place without a full admin data refetch.
+  const displayedAdminSlotIds = useMemo(() => adminSlots.map((s) => s.id), [adminSlots]);
+
+  const handleAdminOccupancyUpdate = useCallback((data) => {
+    setAdminSlots((prev) => prev.map((s) => (
+      s.id === data.slot_id
+        ? {
+            ...s,
+            booked_count:    data.booked_count ?? s.booked_count,
+            available_count: data.available_count ?? s.available_count,
+            status:          data.status ?? s.status,
+          }
+        : s
+    )));
+  }, []);
+
+  useOccupancySocket(
+    displayedAdminSlotIds,
+    handleAdminOccupancyUpdate,
+    activePortal === 'admin' && isAdmin,
+  );
+
   // ── Student actions ───────────────────────────────────────────────────────
   async function handleBook(slotId) {
     if (banInfo) {

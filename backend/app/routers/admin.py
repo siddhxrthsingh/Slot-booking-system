@@ -32,26 +32,27 @@ async def get_slots(
     slots = await admin_service.list_all_slots(
         db, campus, sport, active_only=not include_inactive
     )
-    result = [
-        {
+    result = []
+    for s in slots:
+        capacity = s.get("capacity", 0)
+        booked_count = s.get("booked_count", 0)
+        result.append({
             "id":                str(s["_id"]),
-            "sport":             s["sport"],
-            "date":              s["date"],
-            "start_time":        s["start_time"],
-            "end_time":          s["end_time"],
-            "venue":             s["venue"],
-            "campus":            s["campus"],
-            "capacity":          s["capacity"],
-            "booked_count":      s["booked_count"],
-            "available_count":   s["capacity"] - s["booked_count"],
-            "status":            s["status"],
+            "sport":             s.get("sport"),
+            "date":              s.get("date"),
+            "start_time":        s.get("start_time"),
+            "end_time":          s.get("end_time"),
+            "venue":             s.get("venue") or s.get("facility_name"),
+            "campus":            s.get("campus"),
+            "capacity":          capacity,
+            "booked_count":      booked_count,
+            "available_count":   max(capacity - booked_count, 0),
+            "status":            s.get("status"),
             "requires_approval": s.get("requires_approval", False),
             "created_at":        s.get("created_at"),
             "is_manual":         s.get("is_manual", False),
             "facility_id":       str(s["facility_id"]) if s.get("facility_id") else None,
-        }
-        for s in slots
-    ]
+        })
     return success_response(data=result, message="Slots fetched")
 
 
