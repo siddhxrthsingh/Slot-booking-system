@@ -630,8 +630,17 @@ export default function Dashboard() {
                   {myBookings.filter(b => b.status !== 'cancelled').map((bk) => (
                     <div className="booking-row" key={bk.id}>
                       <div>
-                        <strong>{bk.sport}</strong>
+                        <strong>
+                          {bk.sport}
+                          {bk.is_leader && (
+                            <span className="status-chip" style={{ marginLeft: '8px', fontSize: '0.7rem' }}>
+                              Leader
+                            </span>
+                          )}
+                        </strong>
                         <p>{bk.slot_date ? fmtDate(bk.slot_date) : '—'}{bk.slot_start_time ? `, ${bk.slot_start_time}–${bk.slot_end_time}` : ''}</p>
+                        {/* Facility name (venue is set to the facility name for
+                            facility-aware slots); campus shown alongside it. */}
                         <span>{bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}</span>
                       </div>
                       <div className="booking-actions">
