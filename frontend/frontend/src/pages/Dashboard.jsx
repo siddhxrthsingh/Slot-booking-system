@@ -448,18 +448,6 @@ export default function Dashboard() {
     navigate('/login');
   }
 
-  // ── Input style helper ────────────────────────────────────────────────────
-  const inp = {
-    width: '100%',
-    border: '1px solid rgba(167,139,250,0.22)',
-    borderRadius: '16px',
-    background: 'rgba(7,10,20,0.92)',
-    padding: '12px 16px',
-    color: '#f8fafc',
-    fontSize: '0.9rem',
-    boxSizing: 'border-box',
-  };
-
   if (isStudent) {
     return (
       <div className="sd-shell">
@@ -754,356 +742,323 @@ export default function Dashboard() {
     );
   }
 
+  const ADMIN_TABS = [
+    { id: 'overview', label: 'Dashboard', count: null },
+    { id: 'slots',    label: 'Slots',     count: adminSlots.length },
+    { id: 'bookings', label: 'Bookings',  count: allBookings.length },
+    { id: 'bans',     label: 'Bans',      count: activeBans.length },
+  ];
+  const ADMIN_TABS_SOON = ['Facilities', 'Users / Students', 'Schedule'];
+
+  const slotStatusPill = (status) => {
+    if (status === 'open') return <span className="ad-pill ad-pill-open">{fmtStatus(status)}</span>;
+    if (status === 'full') return <span className="ad-pill ad-pill-full">{fmtStatus(status)}</span>;
+    return <span className="ad-pill ad-pill-neutral">{fmtStatus(status)}</span>;
+  };
+
   return (
-    <main className="dashboard">
-      {/* Toast */}
+    <div className="ad-shell">
       {toast && (
-        <div className={`toast ${toast.ok ? 'toast-ok' : 'toast-err'}`}>{toast.msg}</div>
+        <div className={`sd-toast ${toast.ok ? 'sd-toast-ok' : 'sd-toast-err'}`}>{toast.msg}</div>
       )}
 
-      {/* ── Topbar ── */}
-      <header className="topbar">
-        <div>
-          <p className="brand-kicker">PESU Sports Slot Booking</p>
-          <h1 className="brand-title">Campus Arena</h1>
-        </div>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <div className="portal-switch" role="tablist">
-            <button className="switch-chip active" type="button" disabled>
-              Admin Panel
-            </button>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <p style={{ margin: 0, color: '#f5f3ff', fontWeight: 700, fontSize: '0.9rem' }}>
-              {user?.name || user?.srn}
-            </p>
-            <button onClick={handleLogout} style={{ background: 'none', border: 'none', color: '#8dd8ff', cursor: 'pointer', fontSize: '0.82rem', padding: 0 }}>
-              Sign out
-            </button>
+      {/* ── Sidebar navigation ── */}
+      <aside className="ad-sidebar">
+        <div className="ad-sidebar-brand">
+          <img src="/pesu-compass-mark.webp" alt="PES University" className="ad-sidebar-logo" />
+          <div className="ad-sidebar-brand-text">
+            <strong>PESU SPORTS</strong>
+            <span>Operations</span>
           </div>
         </div>
-      </header>
 
-      {/* ── Hero ── */}
-      <section className="hero-panel">
-        <div
-          className="hero-copy hero-media"
-          style={{ backgroundImage: 'linear-gradient(135deg, rgba(5,8,20,0.84), rgba(93,63,211,0.48)), url("/images/football-hero.jpg")' }}
-        >
-          <p className="eyebrow">Admin Control</p>
-          <h2 className="hero-title">Create, update, and monitor campus sports slots in real time.</h2>
-          <div className="hero-stats">
-            <div><strong>{metrics?.slots.open ?? slots.length}</strong><span>Available slots</span></div>
+        <p className="ad-nav-label">Workspace</p>
+        <nav className="ad-nav-list">
+          {ADMIN_TABS.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`ad-nav-item ${adminTab === tab.id ? 'active' : ''}`}
+              onClick={() => setAdminTab(tab.id)}
+            >
+              {tab.label}
+              {tab.count !== null && <span className="ad-nav-count">{tab.count}</span>}
+            </button>
+          ))}
+          {ADMIN_TABS_SOON.map(label => (
+            <button key={label} type="button" className="ad-nav-item" disabled>
+              {label}
+              <span className="ad-nav-soon">Soon</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="ad-sidebar-footer">
+          <div className="ad-sidebar-user">
+            <span className="sd-avatar">{initials(user?.name, user?.srn)}</span>
             <div>
-              <strong>{metrics ? `${metrics.occupancy_pct}%` : '—'}</strong>
-              <span>Occupancy</span>
+              <p className="ad-sidebar-user-name" style={{ margin: 0 }}>{user?.name || user?.srn}</p>
+              <p className="ad-sidebar-user-role" style={{ margin: 0 }}>{user?.role || 'Admin'}</p>
             </div>
-            <div><strong>Live</strong><span>Real-time updates</span></div>
           </div>
+          <button className="ad-sidebar-signout" type="button" onClick={handleLogout}>Sign out</button>
         </div>
-        <div
-          className="hero-highlight hero-media"
-          style={{ backgroundImage: 'linear-gradient(180deg, rgba(12,14,30,0.3), rgba(12,14,30,0.88)), url("/images/pesu-campus.jpg")' }}
-        >
-          <span className="highlight-label">Operations snapshot</span>
-          <h2>Slot management and live occupancy tracking.</h2>
-          <p style={{ color: '#cbd5ff' }}>
-            {activeBans.length} active ban{activeBans.length !== 1 ? 's' : ''} · {metrics?.bookings.total ?? 0} total bookings
-          </p>
-        </div>
-      </section>
+      </aside>
 
-      {/* ══ ADMIN PORTAL ════════════════════════════════════════════════════ */}
-      {!isStudent && isAdmin && (
-        <>
-          {/* Admin Tab Nav */}
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '24px', flexWrap: 'wrap' }}>
-            {[
-              { id: 'overview',  label: 'Overview' },
-              { id: 'slots',     label: `Manage Slots (${adminSlots.length})` },
-              { id: 'bookings',  label: `All Bookings (${allBookings.length})` },
-              { id: 'bans',      label: `Bans (${activeBans.length})` },
-            ].map(tab => (
-              <button
-                key={tab.id}
-                className={adminTab === tab.id ? 'switch-chip active' : 'switch-chip'}
-                type="button"
-                onClick={() => setAdminTab(tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
-            <button className="secondary-button" type="button" onClick={fetchAdminData} disabled={adminLoading} style={{ marginLeft: 'auto', padding: '8px 18px', fontSize: '0.85rem' }}>
-              {adminLoading ? 'Refreshing…' : '↻ Refresh'}
-            </button>
+      {/* ── Main content ── */}
+      <main className="ad-main">
+        <div className="ad-topbar">
+          <div>
+            <p className="ad-topbar-eyebrow">Admin Console</p>
+            <h1 className="ad-topbar-title">Sports operations · RR Campus</h1>
           </div>
+          <button className="ad-refresh-btn" type="button" onClick={fetchAdminData} disabled={adminLoading}>
+            {adminLoading ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+        </div>
 
-          {/* ── Overview Tab ── */}
-          {adminTab === 'overview' && (
-            <section className="content-grid admin-grid" style={{ marginBottom: '24px' }}>
-              {/* Metrics */}
-              <article className="panel">
-                <div className="panel-header">
-                  <p className="eyebrow">Live Metrics</p>
-                  <h3>Operations pulse</h3>
+        {/* ── Dashboard (Overview) ── */}
+        {adminTab === 'overview' && (
+          <>
+            <div className="ad-metric-grid">
+              {metricCards.map(m => (
+                <div className="ad-metric-card" key={m.label}>
+                  <p className="ad-metric-label">{m.label}</p>
+                  <p className="ad-metric-value">{m.value}</p>
                 </div>
-                <div className="mini-grid">
-                  {metricCards.map(m => (
-                    <div className="mini-stat" key={m.label}>
-                      <strong>{m.value}</strong>
-                      <span>{m.label}</span>
+              ))}
+            </div>
+
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">Create slot</p>
+                <h2 className="ad-card-title">Add new availability</h2>
+              </div>
+              <form className="ad-form-grid" onSubmit={handleCreateSlot}>
+                <label>
+                  <span>Sport</span>
+                  <select className="ad-input" value={slotForm.sport} onChange={e => setSlotForm(f => ({ ...f, sport: e.target.value }))}>
+                    {SPORTS_LIST.map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>Campus</span>
+                  <select className="ad-input" value={slotForm.campus} onChange={e => setSlotForm(f => ({ ...f, campus: e.target.value }))}>
+                    {CAMPUSES.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </label>
+                <label><span>Date</span><input className="ad-input" type="date" value={slotForm.date} onChange={e => setSlotForm(f => ({ ...f, date: e.target.value }))} /></label>
+                <label><span>Venue</span><input className="ad-input" type="text" placeholder="e.g. Main Turf Arena" value={slotForm.venue} onChange={e => setSlotForm(f => ({ ...f, venue: e.target.value }))} /></label>
+                <label><span>Start time</span><input className="ad-input" type="time" value={slotForm.start_time} onChange={e => setSlotForm(f => ({ ...f, start_time: e.target.value }))} /></label>
+                <label><span>End time</span><input className="ad-input" type="time" value={slotForm.end_time} onChange={e => setSlotForm(f => ({ ...f, end_time: e.target.value }))} /></label>
+                <label><span>Max seats</span><input className="ad-input" type="number" min="1" placeholder="20" value={slotForm.capacity} onChange={e => setSlotForm(f => ({ ...f, capacity: e.target.value }))} /></label>
+                <div className="ad-btn-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
+                  <button className="ad-btn-primary" type="submit" disabled={slotFormLoading}>
+                    {slotFormLoading ? 'Creating…' : 'Create slot'}
+                  </button>
+                  <button className="ad-btn-secondary" type="button" onClick={() => setSlotForm(BLANK_SLOT)}>Reset</button>
+                </div>
+              </form>
+            </div>
+          </>
+        )}
+
+        {/* ── Slots ── */}
+        {adminTab === 'slots' && (
+          <div className="ad-card">
+            <div className="ad-card-head" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div>
+                <p className="ad-card-eyebrow">Slots &amp; bookings</p>
+                <h2 className="ad-card-title">Edit or cancel existing slots</h2>
+              </div>
+              <div className="ad-filters">
+                <select className="ad-input" style={{ width: 'auto' }} value={adminFilterCampus} onChange={e => setAdminFilterCampus(e.target.value)}>
+                  <option value="">All Campuses</option>
+                  {CAMPUSES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <select className="ad-input" style={{ width: 'auto' }} value={adminFilterSport} onChange={e => setAdminFilterSport(e.target.value)}>
+                  <option value="">All Sports</option>
+                  {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {(() => {
+              // Hide deprecated sports that no longer exist in the college
+              const DEPRECATED = ['Swimming', 'Tennis'];
+              const visibleSlots = adminSlots.filter(sl => !DEPRECATED.includes(sl.sport));
+              if (visibleSlots.length === 0) return <p className="ad-empty">No slots found.</p>;
+              return (
+                <div className="ad-row-list">
+                  {visibleSlots.map(sl => (
+                    <div key={sl.id}>
+                      {editingSlot === sl.id ? (
+                        <div className="ad-row" style={{ alignItems: 'flex-start' }}>
+                          <div className="ad-edit-grid">
+                            <label>
+                              <span>Venue</span>
+                              <input className="ad-input" value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
+                            </label>
+                            <label>
+                              <span>Capacity</span>
+                              <input className="ad-input" type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
+                            </label>
+                            <label>
+                              <span>Start</span>
+                              <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
+                            </label>
+                            <label>
+                              <span>End</span>
+                              <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
+                            </label>
+                          </div>
+                          <div className="ad-btn-row" style={{ alignSelf: 'flex-end' }}>
+                            <button className="ad-btn-primary ad-btn-sm" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id)}>
+                              {editLoading ? '…' : 'Save'}
+                            </button>
+                            <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => setEditingSlot(null)}>Discard</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="ad-row">
+                          <div className="ad-row-main">
+                            <strong>{sl.sport}</strong>
+                            <p className="ad-row-sub">{sl.campus} · {sl.venue}</p>
+                          </div>
+                          <div className="ad-row-main">
+                            <strong>{fmtDate(sl.date)}</strong>
+                            <p className="ad-row-sub">{sl.start_time}–{sl.end_time}</p>
+                          </div>
+                          <div className="ad-occupancy">
+                            <p className="ad-occupancy-label">{sl.booked_count}/{sl.capacity} booked</p>
+                            <div className="ad-occupancy-bar">
+                              <div
+                                className="ad-occupancy-fill"
+                                style={{ width: `${sl.capacity ? Math.min(100, (sl.booked_count / sl.capacity) * 100) : 0}%` }}
+                              />
+                            </div>
+                          </div>
+                          {slotStatusPill(sl.status)}
+                          <div className="ad-btn-row">
+                            {sl.status !== 'cancelled' && (
+                              <button className="ad-btn-primary ad-btn-sm" type="button" onClick={() => startEditSlot(sl)}>Edit</button>
+                            )}
+                            {sl.status !== 'cancelled' && (
+                              <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => handleCancelSlot(sl.id)}>Cancel</button>
+                            )}
+                            <button className="ad-btn-danger ad-btn-sm" type="button" onClick={() => handleDeleteSlot(sl.id)}>Delete</button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
-              </article>
+              );
+            })()}
+          </div>
+        )}
 
-              {/* Create Slot */}
-              <article className="panel">
-                <div className="panel-header">
-                  <p className="eyebrow">Create Slot</p>
-                  <h3>Add new availability</h3>
+        {/* ── Bookings ── */}
+        {adminTab === 'bookings' && (
+          <>
+            {pendingBookings.length > 0 && (
+              <div className="ad-card">
+                <div className="ad-card-head">
+                  <p className="ad-card-eyebrow">Pending approvals</p>
+                  <h2 className="ad-card-title">{pendingBookings.length} awaiting action</h2>
                 </div>
-                <form className="form-grid" onSubmit={handleCreateSlot}>
-                  <label>
-                    <span>Sport</span>
-                    <select style={inp} value={slotForm.sport} onChange={e => setSlotForm(f => ({ ...f, sport: e.target.value }))}>
-                      {SPORTS_LIST.map(s => <option key={s}>{s}</option>)}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Campus</span>
-                    <select style={inp} value={slotForm.campus} onChange={e => setSlotForm(f => ({ ...f, campus: e.target.value }))}>
-                      {CAMPUSES.map(c => <option key={c}>{c}</option>)}
-                    </select>
-                  </label>
-                  <label><span>Date</span><input style={inp} type="date" value={slotForm.date} onChange={e => setSlotForm(f => ({ ...f, date: e.target.value }))} /></label>
-                  <label><span>Venue</span><input style={inp} type="text" placeholder="e.g. Main Turf Arena" value={slotForm.venue} onChange={e => setSlotForm(f => ({ ...f, venue: e.target.value }))} /></label>
-                  <label><span>Start time</span><input style={inp} type="time" value={slotForm.start_time} onChange={e => setSlotForm(f => ({ ...f, start_time: e.target.value }))} /></label>
-                  <label><span>End time</span><input style={inp} type="time" value={slotForm.end_time} onChange={e => setSlotForm(f => ({ ...f, end_time: e.target.value }))} /></label>
-                  <label><span>Max seats</span><input style={inp} type="number" min="1" placeholder="20" value={slotForm.capacity} onChange={e => setSlotForm(f => ({ ...f, capacity: e.target.value }))} /></label>
-                  <div className="button-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
-                    <button className="primary-button" type="submit" disabled={slotFormLoading}>
-                      {slotFormLoading ? 'Creating…' : 'Create slot'}
-                    </button>
-                    <button className="secondary-button" type="button" onClick={() => setSlotForm(BLANK_SLOT)}>Reset</button>
-                  </div>
-                </form>
-              </article>
-            </section>
-          )}
-
-          {/* ── Slots Tab ── */}
-          {adminTab === 'slots' && (
-            <section className="panel bookings-panel" style={{ marginBottom: '24px' }}>
-              <div className="section-heading booking-heading">
-                <div>
-                  <p className="eyebrow">Manage Slots</p>
-                  <h2>Edit or cancel existing slots</h2>
-                </div>
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                  <select style={{ ...inp, width: 'auto', padding: '9px 14px' }} value={adminFilterCampus} onChange={e => setAdminFilterCampus(e.target.value)}>
-                    <option value="">All Campuses</option>
-                    {CAMPUSES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                  <select style={{ ...inp, width: 'auto', padding: '9px 14px' }} value={adminFilterSport} onChange={e => setAdminFilterSport(e.target.value)}>
-                    <option value="">All Sports</option>
-                    {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-              </div>
-
-              {(() => {
-                // Hide deprecated sports that no longer exist in the college
-                const DEPRECATED = ['Swimming', 'Tennis'];
-                const visibleSlots = adminSlots.filter(sl => !DEPRECATED.includes(sl.sport));
-                if (visibleSlots.length === 0) return <p style={{ color: '#cbd5ff' }}>No slots found.</p>;
-                return (
-                  <div className="admin-booking-list">
-                    {visibleSlots.map(sl => (
-                      <div key={sl.id}>
-                        {editingSlot === sl.id ? (
-                          <div className="admin-booking-row" style={{ flexWrap: 'wrap', gap: '12px', alignItems: 'flex-start' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', flex: '1 1 400px' }}>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Venue</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Capacity</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Start</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>End</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
-                              </label>
-                            </div>
-                            <div className="button-row compact" style={{ alignSelf: 'flex-end' }}>
-                              <button className="primary-button compact-button" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id)}>
-                                {editLoading ? '…' : 'Save'}
-                              </button>
-                              <button className="secondary-button compact-button" type="button" onClick={() => setEditingSlot(null)}>Discard</button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="admin-booking-row">
-                            <div>
-                              <strong>{sl.sport}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{sl.campus} · {sl.venue}</p>
-                            </div>
-                            <div>
-                              <strong>{fmtDate(sl.date)}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{sl.start_time}–{sl.end_time}</p>
-                            </div>
-                            <div>
-                              <strong>{sl.booked_count}/{sl.capacity}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>booked</p>
-                            </div>
-                            <span className="status-chip" style={{
-                              background: sl.status === 'open' ? 'rgba(34,197,94,0.15)' : sl.status === 'full' ? 'rgba(245,158,11,0.15)' : 'rgba(239,68,68,0.15)',
-                              color: sl.status === 'open' ? '#4ade80' : sl.status === 'full' ? '#fbbf24' : '#f87171',
-                            }}>
-                              {fmtStatus(sl.status)}
-                            </span>
-                            <div className="button-row compact">
-                              {sl.status !== 'cancelled' && (
-                                <button className="primary-button compact-button" type="button" onClick={() => startEditSlot(sl)}>Edit</button>
-                              )}
-                              {sl.status !== 'cancelled' && (
-                                <button className="secondary-button compact-button" type="button" onClick={() => handleCancelSlot(sl.id)}>Cancel</button>
-                              )}
-                              <button
-                                className="secondary-button compact-button"
-                                type="button"
-                                style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)' }}
-                                onClick={() => handleDeleteSlot(sl.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </div>
-                        )}
+                <div className="ad-row-list">
+                  {pendingBookings.map(bk => (
+                    <div className="ad-row" key={bk.id}>
+                      <div className="ad-row-main">
+                        <strong>{bk.user?.name || '—'}</strong>
+                        <p className="ad-row-sub">{bk.user?.srn}</p>
                       </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </section>
-          )}
-
-          {/* ── Bookings Tab ── */}
-          {adminTab === 'bookings' && (
-            <>
-              {/* Pending */}
-              {pendingBookings.length > 0 && (
-                <section className="panel bookings-panel" style={{ marginBottom: '24px' }}>
-                  <div className="section-heading booking-heading">
-                    <div>
-                      <p className="eyebrow">Pending Approvals</p>
-                      <h2>Approve or reject requests</h2>
+                      <div className="ad-row-main">
+                        <strong>{bk.sport}</strong>
+                        <p className="ad-row-sub">{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p>
+                      </div>
+                      <span className="ad-pill ad-pill-neutral">Pending</span>
+                      <div className="ad-btn-row">
+                        <button className="ad-btn-primary ad-btn-sm" type="button" disabled={approvalInProgress === bk.id + 'approve'} onClick={() => handleApproval(bk.id, 'approve')}>
+                          {approvalInProgress === bk.id + 'approve' ? '…' : 'Approve'}
+                        </button>
+                        <button className="ad-btn-secondary ad-btn-sm" type="button" disabled={approvalInProgress === bk.id + 'reject'} onClick={() => handleApproval(bk.id, 'reject')}>
+                          {approvalInProgress === bk.id + 'reject' ? '…' : 'Reject'}
+                        </button>
+                      </div>
                     </div>
-                    <p className="section-copy">{pendingBookings.length} awaiting action.</p>
-                  </div>
-                  <div className="admin-booking-list">
-                    {pendingBookings.map(bk => (
-                      <div className="admin-booking-row" key={bk.id}>
-                        <div><strong>{bk.user?.name || '—'}</strong><p>{bk.user?.srn}</p></div>
-                        <div><strong>{bk.sport}</strong><p>{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p></div>
-                        <span className="status-chip">Pending</span>
-                        <div className="button-row compact">
-                          <button className="primary-button compact-button" type="button" disabled={approvalInProgress === bk.id + 'approve'} onClick={() => handleApproval(bk.id, 'approve')}>
-                            {approvalInProgress === bk.id + 'approve' ? '…' : 'Approve'}
-                          </button>
-                          <button className="secondary-button compact-button" type="button" disabled={approvalInProgress === bk.id + 'reject'} onClick={() => handleApproval(bk.id, 'reject')}>
-                            {approvalInProgress === bk.id + 'reject' ? '…' : 'Reject'}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* All bookings */}
-              <section className="panel bookings-panel">
-                <div className="section-heading booking-heading">
-                  <div>
-                    <p className="eyebrow">All Bookings</p>
-                    <h2>Complete booking history</h2>
-                  </div>
+                  ))}
                 </div>
-                {allBookings.length === 0 ? (
-                  <p style={{ color: '#cbd5ff' }}>No bookings yet.</p>
-                ) : (
-                  <div className="admin-booking-list">
-                    {allBookings.map(bk => (
-                      <div className="admin-booking-row" key={bk.id}>
-                        <div><strong>{bk.user?.name || '—'}</strong><p>{bk.user?.srn}</p></div>
-                        <div>
-                          <strong>{bk.sport}</strong>
-                          <p>{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
-                        </div>
-                        <span className="status-chip">{fmtStatus(bk.status)}</span>
-                        <span style={{ color: '#8899cc', fontSize: '0.8rem' }}>{fmt(bk.created_at)}</span>
-                        {bk.status !== 'cancelled' && (
-                          <button
-                            className="secondary-button compact-button"
-                            type="button"
-                            style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)', fontSize: '0.8rem', padding: '6px 14px' }}
-                            onClick={() => handleAdminCancelBooking(bk.id)}
-                          >
-                            Cancel
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </>
-          )}
-
-          {/* ── Bans Tab ── */}
-          {adminTab === 'bans' && (
-            <section className="panel bookings-panel">
-              <div className="section-heading booking-heading">
-                <div>
-                  <p className="eyebrow">Active Bans</p>
-                  <h2>Students with booking suspensions</h2>
-                </div>
-                <p className="section-copy">Bans are applied automatically on late cancellations.</p>
               </div>
-              {activeBans.length === 0 ? (
-                <p style={{ color: '#cbd5ff' }}>No active bans.</p>
+            )}
+
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">All bookings</p>
+                <h2 className="ad-card-title">Complete booking history</h2>
+              </div>
+              {allBookings.length === 0 ? (
+                <p className="ad-empty">No bookings yet.</p>
               ) : (
-                <div className="admin-booking-list">
-                  {activeBans.map(b => (
-                    <div className="admin-booking-row" key={b.id}>
-                      <div>
-                        <strong>{b.user_name || '—'}</strong>
-                        <p style={{ color: '#8899cc' }}>{b.user_srn} · {b.user_email}</p>
+                <div className="ad-row-list">
+                  {allBookings.map(bk => (
+                    <div className="ad-row" key={bk.id}>
+                      <div className="ad-row-main">
+                        <strong>{bk.user?.name || '—'}</strong>
+                        <p className="ad-row-sub">{bk.user?.srn}</p>
                       </div>
-                      <div>
-                        <strong style={{ color: '#ff7c7c' }}>Banned until</strong>
-                        <p>{fmtBanDate(b.banned_until)}</p>
+                      <div className="ad-row-main">
+                        <strong>{bk.sport}</strong>
+                        <p className="ad-row-sub">{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
                       </div>
-                      <div style={{ flex: 1 }}>
-                        <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{b.reason}</p>
-                      </div>
-                      <button className="primary-button compact-button" type="button" onClick={() => handleUnban(b.user_id)}>
-                        Lift Ban
-                      </button>
+                      <span className="ad-pill ad-pill-neutral">{fmtStatus(bk.status)}</span>
+                      <span className="ad-row-sub">{fmt(bk.created_at)}</span>
+                      {bk.status !== 'cancelled' && (
+                        <button className="ad-btn-danger ad-btn-sm" type="button" onClick={() => handleAdminCancelBooking(bk.id)}>
+                          Cancel
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
               )}
-            </section>
-          )}
-        </>
-      )}
-    </main>
+            </div>
+          </>
+        )}
+
+        {/* ── Bans ── */}
+        {adminTab === 'bans' && (
+          <div className="ad-card">
+            <div className="ad-card-head">
+              <p className="ad-card-eyebrow">Active bans</p>
+              <h2 className="ad-card-title">Students with booking suspensions</h2>
+            </div>
+            {activeBans.length === 0 ? (
+              <p className="ad-empty">No active bans.</p>
+            ) : (
+              <div className="ad-row-list">
+                {activeBans.map(b => (
+                  <div className="ad-row" key={b.id}>
+                    <div className="ad-row-main">
+                      <strong>{b.user_name || '—'}</strong>
+                      <p className="ad-row-sub">{b.user_srn} · {b.user_email}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong style={{ color: 'var(--sd-accent)' }}>Banned until</strong>
+                      <p className="ad-row-sub">{fmtBanDate(b.banned_until)}</p>
+                    </div>
+                    <p className="ad-row-sub" style={{ flex: 1 }}>{b.reason}</p>
+                    <button className="ad-btn-primary ad-btn-sm" type="button" onClick={() => handleUnban(b.user_id)}>
+                      Lift ban
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+    </div>
   );
 }
