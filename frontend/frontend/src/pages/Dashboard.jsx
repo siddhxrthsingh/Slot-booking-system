@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -119,10 +119,20 @@ export default function Dashboard() {
   const [slotsLoading,     setSlotsLoading]     = useState(true);
   const [myBookings,       setMyBookings]       = useState([]);
   const [bookingsLoading,  setBookingsLoading]  = useState(true);
+  const [bookingsError,    setBookingsError]    = useState(null);
+  const [slotsError,       setSlotsError]       = useState(null);
   const [bookingInProgress,setBookingInProgress]= useState(null);
   const [cancelInProgress, setCancelInProgress] = useState(null);
   const [toast,            setToast]            = useState(null);
   const [banInfo,          setBanInfo]          = useState(null);
+
+  // Synchronous guards against double-submit from rapid repeat clicks before
+  // React has a chance to re-render the disabled button state.
+  const bookingLockRef = useRef(new Set());
+  const cancelLockRef  = useRef(new Set());
+
+  // Click-outside handling for the profile/mobile nav menus.
+  const profileRef = useRef(null);
 
   // Student filters (RR only for now; sport options are derived from the
   // facility-aware slot data returned by the backend, not hardcoded)
@@ -181,7 +191,9 @@ export default function Dashboard() {
       // facilities/sports the backend actually returns.
       const data = await getAvailableSlots({ campus: 'RR' });
       setSlots(data);
+      setSlotsError(null);
     } catch {
+      setSlotsError('Failed to load available slots.');
       showToast('Failed to load available slots.', false);
     } finally {
       setSlotsLoading(false);
@@ -193,8 +205,9 @@ export default function Dashboard() {
     try {
       const data = await getMyBookings();
       setMyBookings(data);
+      setBookingsError(null);
     } catch {
-      // silent
+      setBookingsError('Failed to load your bookings.');
     } finally {
       setBookingsLoading(false);
     }
@@ -249,6 +262,20 @@ export default function Dashboard() {
     if (activePortal === 'admin' && isAdmin) fetchAdminData();
   }, [activePortal, isAdmin, fetchAdminData]);
 
+  // Close the profile/mobile nav dropdowns on an outside click so they don't
+  // stay open and obscure content after the user has moved on.
+  useEffect(() => {
+    if (!profileOpen && !mobileNavOpen) return;
+    function handleOutsideClick(e) {
+      if (profileRef.current && !profileRef.current.contains(e.target)) {
+        setProfileOpen(false);
+        setMobileNavOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [profileOpen, mobileNavOpen]);
+
   // ── WebSocket live updates ────────────────────────────────────────────────
   const handleWsMessage = useCallback((msg) => {
     const refresh = () => {
@@ -299,6 +326,10 @@ export default function Dashboard() {
       showToast(`Your booking access is suspended until ${fmtBanDate(banInfo.banned_until)}.`, false);
       return;
     }
+    // Ref-based guard closes the race between a rapid double-click and the
+    // next React render actually disabling the button.
+    if (bookingLockRef.current.has(slotId)) return;
+    bookingLockRef.current.add(slotId);
     setBookingInProgress(slotId);
     try {
       await createBooking(slotId);
@@ -309,12 +340,15 @@ export default function Dashboard() {
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not book slot.', false);
     } finally {
+      bookingLockRef.current.delete(slotId);
       setBookingInProgress(null);
     }
   }
 
   async function handleCancel(bookingId) {
     if (!window.confirm('Cancel this booking? Late cancellations (< 2 hours before) incur a 2-day booking ban.')) return;
+    if (cancelLockRef.current.has(bookingId)) return;
+    cancelLockRef.current.add(bookingId);
     setCancelInProgress(bookingId);
     try {
       const result = await cancelBooking(bookingId);
@@ -330,6 +364,7 @@ export default function Dashboard() {
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not cancel booking.', false);
     } finally {
+      cancelLockRef.current.delete(bookingId);
       setCancelInProgress(null);
     }
   }
@@ -515,6 +550,15 @@ export default function Dashboard() {
     setRosterLoading(false);
   }
 
+  useEffect(() => {
+    if (!rosterSlotId) return;
+    function handleEscape(e) {
+      if (e.key === 'Escape') closeRoster();
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [rosterSlotId]);
+
   async function handleCreateSlot(e) {
     e.preventDefault();
     if (!slotForm.facility_id || !slotForm.date || !slotForm.start_time || !slotForm.end_time) {
@@ -664,13 +708,20 @@ export default function Dashboard() {
               <button
                 className="sd-nav-toggle"
                 type="button"
-                aria-label="Open menu"
+                aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+                aria-expanded={mobileNavOpen}
                 onClick={() => setMobileNavOpen(o => !o)}
               >
                 ☰
               </button>
-              <div className="sd-profile">
-                <button className="sd-profile-trigger" type="button" onClick={() => setProfileOpen(o => !o)}>
+              <div className="sd-profile" ref={profileRef}>
+                <button
+                  className="sd-profile-trigger"
+                  type="button"
+                  aria-haspopup="true"
+                  aria-expanded={profileOpen}
+                  onClick={() => setProfileOpen(o => !o)}
+                >
                   <span className="sd-avatar">{initials(user?.name, user?.srn)}</span>
                   <span className="sd-profile-name">
                     <strong>{user?.name || user?.srn}</strong>
@@ -778,6 +829,11 @@ export default function Dashboard() {
 
               {slotsLoading ? (
                 <p className="sd-empty">Loading slots…</p>
+              ) : slotsError ? (
+                <p className="sd-empty">
+                  {slotsError}{' '}
+                  <button type="button" className="sd-chip" onClick={fetchSlots}>Retry</button>
+                </p>
               ) : facilityGroups.length === 0 ? (
                 <p className="sd-empty">No slots available right now.</p>
               ) : (
@@ -856,6 +912,11 @@ export default function Dashboard() {
 
                 {bookingsLoading ? (
                   <p className="sd-empty">Loading…</p>
+                ) : bookingsError ? (
+                  <p className="sd-empty">
+                    {bookingsError}{' '}
+                    <button type="button" className="sd-chip" onClick={fetchMyBookings}>Retry</button>
+                  </p>
                 ) : activeBookings.length === 0 ? (
                   <p className="sd-empty">No active bookings yet. Join a slot to get started!</p>
                 ) : (
@@ -1524,13 +1585,19 @@ export default function Dashboard() {
       {/* ── Slot roster modal (accountability view, admin-only) ── */}
       {rosterSlotId && (
         <div className="ad-modal-overlay" onClick={closeRoster}>
-          <div className="ad-modal" onClick={e => e.stopPropagation()}>
+          <div
+            className="ad-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="roster-modal-title"
+            onClick={e => e.stopPropagation()}
+          >
             <div className="ad-modal-header">
               <div>
                 <p className="ad-card-eyebrow">Slot roster</p>
-                <h2 className="ad-card-title">Occupancy &amp; accountability</h2>
+                <h2 className="ad-card-title" id="roster-modal-title">Occupancy &amp; accountability</h2>
               </div>
-              <button className="ad-modal-close" type="button" onClick={closeRoster}>✕ Close</button>
+              <button className="ad-modal-close" type="button" aria-label="Close slot roster" onClick={closeRoster}>✕ Close</button>
             </div>
 
             {rosterLoading ? (
