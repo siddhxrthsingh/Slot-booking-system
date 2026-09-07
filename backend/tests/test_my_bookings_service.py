@@ -1,9 +1,12 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 
 from app.services.booking_service import get_user_bookings
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class FakeCollection:
@@ -85,8 +88,10 @@ def _booking(user_id, slot_id, **overrides):
 class MyBookingsTests(unittest.IsolatedAsyncioTestCase):
     async def test_upcoming_confirmed_booking_is_not_marked_past(self):
         user_id = ObjectId()
-        future = datetime.now(timezone.utc) + timedelta(hours=2)
-        slot = _slot(date=future.replace(hour=0, minute=0, second=0, microsecond=0),
+        # start_time/end_time are IST wall-clock, so "future" must be
+        # computed in IST for the is_past comparison to land as intended.
+        future = datetime.now(IST) + timedelta(hours=2)
+        slot = _slot(date=future.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
                      start_time=f"{future.hour:02d}:00", end_time=f"{(future.hour + 1) % 24:02d}:00")
         booking = _booking(user_id, slot["_id"])
         db = FakeDb(bookings=[booking], slots=[slot])
@@ -124,6 +129,23 @@ class MyBookingsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["status"], "cancelled")
+
+    async def test_slot_date_is_serialized_as_timezone_aware_utc(self):
+        # slot["date"] comes back from MongoDB as a naive datetime
+        # representing a UTC calendar-day bucket. Serialized without an
+        # explicit UTC offset it's parsed as *local* time by the frontend,
+        # silently shifting the calendar day the client-side active/history
+        # split (isBookingPast in Dashboard.jsx) computes against.
+        user_id = ObjectId()
+        future = datetime.now(timezone.utc) + timedelta(days=2)
+        slot = _slot(date=future.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None))
+        booking = _booking(user_id, slot["_id"])
+        db = FakeDb(bookings=[booking], slots=[slot])
+
+        result = await get_user_bookings(db, str(user_id))
+
+        self.assertIsNotNone(result[0]["slot_date"].tzinfo)
+        self.assertEqual(result[0]["slot_date"].utcoffset(), timedelta(0))
 
     async def test_booking_with_missing_slot_is_marked_past(self):
         user_id = ObjectId()

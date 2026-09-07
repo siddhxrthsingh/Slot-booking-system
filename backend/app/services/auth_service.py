@@ -139,6 +139,11 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
             "srn":      raw.get("srn") or raw.get("prn") or username.upper(),
             "name":     raw.get("name", ""),
             "email":    raw.get("email", ""),
+            # "phone" is the authoritative PESUAuth profile field (confirmed
+            # against the API docs/live response); "phone_number" is kept
+            # only as a harmless fallback in case a differently-shaped
+            # response is ever returned.
+            "phone":    raw.get("phone") or raw.get("phone_number"),
             "program":  raw.get("program"),
             "branch":   raw.get("branch"),
             "campus":   campus,
@@ -160,6 +165,7 @@ def _mock_pesu_profile(username: str) -> dict:
         "srn":      username.upper(),
         "email":    f"{username.lower()}@pesu.pes.edu",
         "name":     "Dev User (mock)",
+        "phone":    "9999999999",
         "program":  "Bachelor of Technology",
         "branch":   "Computer Science and Engineering",
         "campus":   "RR",
@@ -179,19 +185,26 @@ async def upsert_user(db: AsyncIOMotorDatabase, profile: dict) -> dict:
     if not srn:
         raise ValueError("PESUAuth did not return an SRN for this user.")
 
+    set_fields = {
+        "email":      profile.get("email", ""),
+        "name":       profile.get("name", ""),
+        "program":    profile.get("program"),
+        "branch":     profile.get("branch"),
+        "campus":     profile.get("campus"),
+        "semester":   profile.get("semester"),
+        "section":    profile.get("section"),
+        "last_login": now,
+    }
+    # Only overwrite phone when the auth provider actually returned one, so a
+    # login response that omits it never blanks out a previously captured
+    # phone number.
+    if profile.get("phone"):
+        set_fields["phone"] = profile["phone"]
+
     result = await db["users"].find_one_and_update(
         {"srn": srn},
         {
-            "$set": {
-                "email":      profile.get("email", ""),
-                "name":       profile.get("name", ""),
-                "program":    profile.get("program"),
-                "branch":     profile.get("branch"),
-                "campus":     profile.get("campus"),
-                "semester":   profile.get("semester"),
-                "section":    profile.get("section"),
-                "last_login": now,
-            },
+            "$set": set_fields,
             "$setOnInsert": {
                 "srn":        srn,
                 "role":       "student",

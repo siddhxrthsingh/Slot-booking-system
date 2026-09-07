@@ -105,6 +105,45 @@ class SlotRosterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await get_slot_roster(db, "not-a-valid-object-id")
 
+    async def test_missing_snapshot_phone_falls_back_to_authoritative_user_phone(self):
+        # Reproduces the actual admin-roster bug: a booking made before phone
+        # was wired into user_snapshot (or whose snapshot otherwise lacks a
+        # phone) shows "Phone: —" even though the live user record has one.
+        slot = make_slot()
+        user = make_user(phone="9876543210")
+        db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)], users=[dict(user)])
+
+        booking = await create_booking(db, user=user, slot_id=str(slot["_id"]))
+        # Simulate a historical booking captured before phone was in the
+        # snapshot — the stored record itself is never rewritten by this
+        # fallback, only the roster's read path.
+        for doc in db["bookings"].docs:
+            if doc["_id"] == booking["_id"]:
+                doc["user_snapshot"]["phone"] = None
+
+        roster = await get_slot_roster(db, str(slot["_id"]))
+
+        entry = roster["participants"][0]
+        self.assertEqual(entry["user_snapshot"]["phone"], "9876543210")
+        # The underlying booking document's own snapshot is untouched.
+        stored = next(d for d in db["bookings"].docs if d["_id"] == booking["_id"])
+        self.assertIsNone(stored["user_snapshot"]["phone"])
+
+    async def test_snapshot_phone_present_is_not_overridden(self):
+        slot = make_slot()
+        user = make_user(phone="9876543210")
+        db = FakeDb(
+            slots=[slot],
+            facilities=[make_facility(slot, 6)],
+            users=[dict(user, phone="0000000000")],
+        )
+
+        await create_booking(db, user=user, slot_id=str(slot["_id"]))
+
+        roster = await get_slot_roster(db, str(slot["_id"]))
+
+        self.assertEqual(roster["participants"][0]["user_snapshot"]["phone"], "9876543210")
+
 
 if __name__ == "__main__":
     unittest.main()

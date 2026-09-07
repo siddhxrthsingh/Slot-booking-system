@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 
@@ -11,6 +12,8 @@ from tests.test_booking_join_service import (
     make_slot,
     make_user,
 )
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
@@ -175,8 +178,8 @@ class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(db["slots"].docs[0]["leader_user_id"])
 
     async def test_late_cancellation_applies_ban(self):
-        date = datetime.now(timezone.utc) + timedelta(minutes=30)
-        slot = make_slot(date=date.replace(hour=0, minute=0, second=0, microsecond=0),
+        date = datetime.now(IST) + timedelta(minutes=30)
+        slot = make_slot(date=date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
                           start_time=date.strftime("%H:%M"),
                           end_time=(date + timedelta(hours=1)).strftime("%H:%M"))
         user = make_user()
@@ -213,8 +216,8 @@ class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(booking3["status"], "confirmed")
 
     async def test_banned_user_cannot_join_another_slot(self):
-        date = datetime.now(timezone.utc) + timedelta(minutes=30)
-        late_slot = make_slot(date=date.replace(hour=0, minute=0, second=0, microsecond=0),
+        date = datetime.now(IST) + timedelta(minutes=30)
+        late_slot = make_slot(date=date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
                                start_time=date.strftime("%H:%M"),
                                end_time=(date + timedelta(hours=1)).strftime("%H:%M"))
         other_slot = make_slot(date=(datetime.now(timezone.utc) + timedelta(days=5)))
@@ -243,9 +246,9 @@ class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cannot rejoin", str(ctx.exception))
 
     async def test_leaving_already_started_slot_is_treated_as_late_cancel(self):
-        started = datetime.now(timezone.utc) - timedelta(minutes=15)
+        started = datetime.now(IST) - timedelta(minutes=15)
         slot = make_slot(
-            date=started.replace(hour=0, minute=0, second=0, microsecond=0),
+            date=started.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
             start_time=started.strftime("%H:%M"),
             end_time=(started + timedelta(hours=1)).strftime("%H:%M"),
         )

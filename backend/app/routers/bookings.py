@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,7 +8,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.booking import BookingCreate
 from app.services import booking_service, email_service
-from app.utils import success_response
+from app.utils import IST, ensure_utc, success_response
 from app.ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
 @router.get("/available")
 async def list_available_slots(
     sport:  str | None = Query(default=None),
-    date:   datetime | None = Query(default=None),
+    date:   date_type | None = Query(default=None),
     campus: Literal["RR", "EC"] | None = Query(default=None),
     venue:  str | None = Query(default=None),
     db:     AsyncIOMotorDatabase = Depends(get_db),
@@ -106,7 +106,7 @@ async def my_ban_status(
     ban = await booking_service.check_user_ban(db, ObjectId(str(current_user["_id"])))
     if ban:
         return success_response(
-            data={"banned": True, "banned_until": ban["banned_until"], "reason": ban.get("reason")},
+            data={"banned": True, "banned_until": ensure_utc(ban["banned_until"]), "reason": ban.get("reason")},
             message="User is banned",
         )
     return success_response(data={"banned": False}, message="No active ban")
@@ -148,7 +148,7 @@ async def cancel_booking(
         from bson import ObjectId
         ban = await booking_service.check_user_ban(db, ObjectId(str(current_user["_id"])))
         if ban:
-            banned_until_str = ban["banned_until"].strftime("%d %b %Y, %H:%M UTC")
+            banned_until_str = ensure_utc(ban["banned_until"]).astimezone(IST).strftime("%d %b %Y, %H:%M IST")
 
     if slot and current_user.get("email"):
         await email_service.send_booking_cancellation(

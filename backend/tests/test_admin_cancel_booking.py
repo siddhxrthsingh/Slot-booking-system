@@ -1,10 +1,13 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 
 from app.services.booking_service import cancel_booking, check_user_ban, create_booking
 from tests.test_booking_join_service import FakeDb, make_facility, make_slot, make_user
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class AdminCancelBookingTests(unittest.IsolatedAsyncioTestCase):
@@ -109,9 +112,11 @@ class AdminCancelBookingTests(unittest.IsolatedAsyncioTestCase):
         # Slot starts in 30 minutes — well inside the cancellation window —
         # so this would trigger a ban for a student self-cancel, but must
         # NOT trigger one when an admin force-cancels on the student's behalf.
-        near = datetime.now(timezone.utc) + timedelta(minutes=30)
+        # Slot start_time/end_time are IST wall-clock, so "near" must be
+        # computed in IST for the ban-window comparison to land as intended.
+        near = datetime.now(IST) + timedelta(minutes=30)
         slot = make_slot(
-            date=near.replace(hour=0, minute=0, second=0, microsecond=0),
+            date=near.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
             start_time=near.strftime("%H:%M"),
             end_time=(near + timedelta(hours=1)).strftime("%H:%M"),
         )
@@ -133,9 +138,11 @@ class AdminCancelBookingTests(unittest.IsolatedAsyncioTestCase):
         # Same near-start-time scenario, but via the normal self-cancel path
         # (apply_late_ban left at its default True) — existing behavior must
         # be unchanged.
-        near = datetime.now(timezone.utc) + timedelta(minutes=30)
+        # Slot start_time/end_time are IST wall-clock, so "near" must be
+        # computed in IST for the ban-window comparison to land as intended.
+        near = datetime.now(IST) + timedelta(minutes=30)
         slot = make_slot(
-            date=near.replace(hour=0, minute=0, second=0, microsecond=0),
+            date=near.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
             start_time=near.strftime("%H:%M"),
             end_time=(near + timedelta(hours=1)).strftime("%H:%M"),
         )

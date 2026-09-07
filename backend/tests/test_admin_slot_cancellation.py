@@ -1,11 +1,14 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 
 from app.services.admin_service import cancel_slot
 from app.services.booking_service import cancel_booking, check_user_ban, create_booking
 from tests.test_booking_join_service import FakeDb, make_facility, make_slot, make_user
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class AdminSlotCancellationTests(unittest.IsolatedAsyncioTestCase):
@@ -89,9 +92,9 @@ class AdminSlotCancellationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_active["status"], "cancelled")
 
     async def test_admin_slot_cancellation_does_not_ban_participants(self):
-        near = datetime.now(timezone.utc) + timedelta(minutes=30)
+        near = datetime.now(IST) + timedelta(minutes=30)
         slot = make_slot(
-            date=near.replace(hour=0, minute=0, second=0, microsecond=0),
+            date=near.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
             start_time=near.strftime("%H:%M"),
             end_time=(near + timedelta(hours=1)).strftime("%H:%M"),
         )

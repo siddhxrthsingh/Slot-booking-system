@@ -1,6 +1,9 @@
 import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
@@ -82,7 +85,7 @@ class FakeCollection:
         # [("user_id", "slot_id")] — mirrors the real `bookings` unique index.
         self.unique_keys = unique_keys or []
 
-    def find(self, query=None):
+    def find(self, query=None, projection=None):
         query = query or {}
         return FakeCursor([doc for doc in self.docs if matches(doc, query)])
 
@@ -141,12 +144,13 @@ def _apply_update(doc, update):
 
 
 class FakeDb:
-    def __init__(self, slots=None, bookings=None, facilities=None, bans=None):
+    def __init__(self, slots=None, bookings=None, facilities=None, bans=None, users=None):
         self.collections = {
             "slots": FakeCollection(slots),
             "bookings": FakeCollection(bookings, unique_keys=[("user_id", "slot_id")]),
             "facilities": FakeCollection(facilities),
             "bans": FakeCollection(bans),
+            "users": FakeCollection(users),
         }
 
     def __getitem__(self, name):
@@ -377,6 +381,48 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             await create_booking(db, user=user, slot_id=str(slot2["_id"]))
         self.assertIn("Time clash", str(ctx.exception))
+
+    async def test_expired_slot_cannot_be_joined(self):
+        # Slot's date/end_time are in the past — the join path (not just
+        # student retrieval) must reject it, since backend is authoritative.
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        slot = make_slot(date=past, start_time="09:00", end_time="10:00", status="open")
+        user = make_user()
+        db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)])
+
+        with self.assertRaises(ValueError) as ctx:
+            await create_booking(db, user=user, slot_id=str(slot["_id"]))
+        self.assertIn("already ended", str(ctx.exception))
+        self.assertEqual(db["slots"].docs[0]["booked_count"], 0)
+
+    async def test_slot_ending_earlier_today_cannot_be_joined(self):
+        # Same calendar day, but the slot's own end time has already passed —
+        # exercises the real "now" comparison (via IST wall-clock times)
+        # rather than a date-only check.
+        now_ist = datetime.now(IST)
+        earlier_end_ist = now_ist - timedelta(hours=1)
+        earlier_start_ist = now_ist - timedelta(hours=2)
+        # Bucket the slot by the reference time's own IST calendar day (not
+        # "now"'s) — start/end and the date bucket must describe the same
+        # day even when "now" is early enough (just after IST midnight) that
+        # subtracting hours rolls into the previous calendar day.
+        bucket = earlier_end_ist.replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+        )
+        slot = make_slot(
+            date=bucket,
+            start_time=earlier_start_ist.strftime("%H:%M"),
+            end_time=earlier_end_ist.strftime("%H:%M"),
+            status="open",
+        )
+        user = make_user()
+        db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)])
+
+        with self.assertRaises(ValueError) as ctx:
+            await create_booking(db, user=user, slot_id=str(slot["_id"]))
+        self.assertIn("already ended", str(ctx.exception))
 
 
 if __name__ == "__main__":

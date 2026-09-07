@@ -1,7 +1,10 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.services.booking_service import list_available_slots, serialize_student_slot
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class FakeUpdateResult:
@@ -31,6 +34,12 @@ class FakeCollection:
 
     def find(self, query):
         return FakeCursor([doc for doc in self.docs if matches(doc, query)])
+
+    async def find_one(self, query, projection=None):
+        for doc in self.docs:
+            if matches(doc, query):
+                return doc
+        return None
 
     async def update_one(self, query, update, upsert=False):
         for doc in self.docs:
@@ -165,6 +174,20 @@ class FacilitySlotRetrievalTests(unittest.IsolatedAsyncioTestCase):
         forbidden = {"participants", "user_snapshot", "leader_user_id", "name", "srn", "phone", "branch", "program", "semester", "section"}
         self.assertFalse(forbidden & set(item))
 
+    async def test_serialized_date_is_timezone_aware_utc(self):
+        # slot["date"] as read back from MongoDB is always a naive datetime
+        # representing a UTC calendar-day bucket. If it's serialized to JSON
+        # without an explicit UTC offset, a browser parses the resulting
+        # string as *local* time — for an IST viewer that silently shifts
+        # the calendar day backward by one, breaking the rolling 3-day
+        # window (day-after-tomorrow's slots land on "tomorrow" instead).
+        naive_date = future_date().replace(tzinfo=None)
+        item = serialize_student_slot(slot(date=naive_date))
+
+        self.assertIsNotNone(item["date"].tzinfo)
+        self.assertEqual(item["date"].utcoffset(), timedelta(0))
+        self.assertEqual(item["date"].date(), naive_date.date())
+
     async def test_old_non_facility_slots_do_not_crash(self):
         legacy = slot(facility_id=None, facility_name=None, venue="Legacy Venue")
         item = serialize_student_slot(legacy)
@@ -238,7 +261,32 @@ class AutomaticGenerationOnRetrievalTests(unittest.IsolatedAsyncioTestCase):
             len([s for s in db["slots"].docs if s.get("slot_type") == "generated"]), 2
         )
 
+    async def test_second_request_skips_generation_pass_entirely(self):
+        # generate_slots_for_date() only ever reads the facilities collection
+        # (there's no other caller of facilities.find in this path), so a
+        # find() call there is a direct proxy for "generation actually ran".
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+        original_find = db["facilities"].find
+        call_count = {"n": 0}
+
+        def counting_find(query):
+            call_count["n"] += 1
+            return original_find(query)
+
+        db["facilities"].find = counting_find
+
+        await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+        self.assertEqual(call_count["n"], 1)
+
+        await list_available_slots(db, sport="Badminton", date=weekday_date, campus="RR")
+        self.assertEqual(call_count["n"], 1, "second request must not re-run generation")
+
     async def test_existing_generated_slot_state_is_preserved_across_retrieval(self):
+        # A generated slot already existing for this campus/date means the
+        # generation pass is skipped entirely (per the new "already
+        # generated" fast path), so its booked_count/status must come back
+        # untouched.
         weekday_date = future_weekday()
         db = self._weekday_db()
         db["slots"].docs.append(slot(
@@ -251,9 +299,9 @@ class AutomaticGenerationOnRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
         existing = next(item for item in result if item["_id"] == "existing")
         self.assertEqual(existing["booked_count"], 3)
-        # only the missing 10:00 slot should have been newly generated
+        # generation was skipped entirely, so no other slot was created
         generated_count = len([s for s in db["slots"].docs if s.get("slot_type") == "generated"])
-        self.assertEqual(generated_count, 2)
+        self.assertEqual(generated_count, 1)
 
     async def test_manual_slots_are_untouched_by_generation_trigger(self):
         weekday_date = future_weekday()
@@ -318,33 +366,43 @@ class PastSlotVisibilityTests(unittest.IsolatedAsyncioTestCase):
     already elapsed, without deleting the underlying document."""
 
     async def test_slot_that_already_ended_today_is_excluded(self):
-        now = datetime.now(timezone.utc)
-        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        elapsed_end = now - timedelta(minutes=5)
+        # Slot start_time/end_time are IST wall-clock (RR campus business
+        # hours), so "now" for this comparison must be the current IST time.
+        now_ist = datetime.now(IST)
+        elapsed_end = now_ist - timedelta(minutes=5)
+        elapsed_start = elapsed_end - timedelta(hours=1)
+        # Bucket by elapsed_start's own IST calendar day so the stored date
+        # and wall-clock times always describe the same day, even right
+        # after IST midnight when subtracting time rolls to the prior day.
+        bucket = elapsed_start.replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+        )
         db = FakeDb([
             slot(
                 _id="elapsed",
-                date=today_midnight,
-                start_time=(elapsed_end - timedelta(hours=1)).strftime("%H:%M"),
+                date=bucket,
+                start_time=elapsed_start.strftime("%H:%M"),
                 end_time=elapsed_end.strftime("%H:%M"),
             ),
         ])
 
-        result = await list_available_slots(db, sport="Badminton", date=today_midnight, campus="RR")
+        result = await list_available_slots(db, sport="Badminton", date=bucket, campus="RR")
 
         self.assertEqual(result, [])
         # The document itself must still exist — not deleted.
         self.assertEqual(len(db["slots"].docs), 1)
 
     async def test_slot_still_in_progress_or_upcoming_today_is_included(self):
-        now = datetime.now(timezone.utc)
-        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        future_end = now + timedelta(hours=1)
+        now_ist = datetime.now(IST)
+        today_midnight = now_ist.replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+        )
+        future_end = now_ist + timedelta(hours=1)
         db = FakeDb([
             slot(
                 _id="upcoming",
                 date=today_midnight,
-                start_time=now.strftime("%H:%M"),
+                start_time=now_ist.strftime("%H:%M"),
                 end_time=future_end.strftime("%H:%M"),
             ),
         ])

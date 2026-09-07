@@ -8,6 +8,7 @@ from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.services.booking_service import _slot_end_dt, _slot_start_dt, cancel_booking
+from app.utils import ensure_utc
 
 
 def _filter_active_slots(slots: list[dict], now: datetime | None = None) -> list[dict]:
@@ -425,9 +426,9 @@ async def list_all_bookings(
                 "sport": b["sport"],
                 "status": b["status"],
                 "booking_date": b["booking_date"],
-                "cancelled_at": b.get("cancelled_at"),
+                "cancelled_at": ensure_utc(b.get("cancelled_at")),
                 "notes": b.get("notes"),
-                "created_at": b["created_at"],
+                "created_at": ensure_utc(b["created_at"]),
                 "user": {
                     "id": str(user["_id"]),
                     "name": user.get("name"),
@@ -667,19 +668,38 @@ async def get_slot_roster(db: AsyncIOMotorDatabase, slot_id: str) -> dict:
         .to_list(length=500)
     )
 
-    participants = [
-        {
+    # A booking's own user_snapshot is the historically-accurate
+    # accountability record and is what's used everywhere below — except
+    # `phone`. Some older bookings were captured before the phone field was
+    # wired into the snapshot (see auth_service.upsert_user), so for
+    # accountability purposes only, fall back to the authoritative live
+    # `users.phone` when the snapshot's own phone is missing. This never
+    # rewrites the stored snapshot and never falls back for any other field.
+    missing_phone_user_ids = [
+        b["user_id"] for b in bookings if not (b.get("user_snapshot") or {}).get("phone")
+    ]
+    live_phone_by_user_id: dict = {}
+    if missing_phone_user_ids:
+        live_users = await db["users"].find(
+            {"_id": {"$in": missing_phone_user_ids}}, {"phone": 1}
+        ).to_list(length=len(missing_phone_user_ids))
+        live_phone_by_user_id = {u["_id"]: u.get("phone") for u in live_users if u.get("phone")}
+
+    participants = []
+    for b in bookings:
+        snapshot = dict(b.get("user_snapshot") or {})
+        if not snapshot.get("phone") and b["user_id"] in live_phone_by_user_id:
+            snapshot["phone"] = live_phone_by_user_id[b["user_id"]]
+        participants.append({
             "booking_id":    str(b["_id"]),
             "user_id":       str(b["user_id"]),
             "status":        b["status"],
             "is_leader":     b.get("is_leader", False),
-            "joined_at":     b.get("joined_at"),
-            "cancelled_at":  b.get("cancelled_at"),
+            "joined_at":     ensure_utc(b.get("joined_at")),
+            "cancelled_at":  ensure_utc(b.get("cancelled_at")),
             "cancelled_by":  str(b["cancelled_by"]) if b.get("cancelled_by") else None,
-            "user_snapshot": b.get("user_snapshot"),
-        }
-        for b in bookings
-    ]
+            "user_snapshot": snapshot,
+        })
 
     return {
         "slot": {

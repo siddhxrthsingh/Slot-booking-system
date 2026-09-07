@@ -13,15 +13,18 @@ Join policy (Phase 3 Step 1B):
 
 Cancellation/leave behavior is out of scope for this step and remains as before.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, time, timedelta, timezone
 from typing import Literal
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from app.utils import IST, ensure_utc
 from pymongo.errors import DuplicateKeyError
 
 from app.config import get_settings
 from app.services.slot_generation_service import generate_slots_for_date
+from app.utils import IST
 
 settings = get_settings()
 
@@ -30,11 +33,27 @@ settings = get_settings()
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _slot_date(slot: dict) -> datetime:
+    """slot['date'] is stored as a datetime, but a handful of pre-existing
+    documents have it as an ISO string (e.g. "2026-09-07T00:00:00.000Z").
+    Parse defensively rather than crashing the whole slots/metrics/bookings
+    listing on one malformed record."""
+    d = slot["date"]
+    if isinstance(d, str):
+        return datetime.fromisoformat(d.replace("Z", "+00:00"))
+    return d
+
+
 def _slot_start_dt(slot: dict) -> datetime:
-    """Combine slot['date'] (datetime) and slot['start_time'] (HH:MM) into UTC datetime."""
-    d: datetime = slot["date"]
+    """Combine slot['date'] (a calendar-day bucket) and slot['start_time']
+    (HH:MM) into the actual UTC instant it represents. RR campus operates
+    entirely in India, so start_time/end_time are always IST wall-clock
+    times — they must be localized to Asia/Kolkata (not treated as UTC)
+    before converting to UTC for comparison against a real UTC "now"."""
+    d = _slot_date(slot)
     h, m = map(int, slot["start_time"].split(":"))
-    return d.replace(hour=h, minute=m, second=0, microsecond=0, tzinfo=timezone.utc)
+    local = datetime(d.year, d.month, d.day, h, m, tzinfo=IST)
+    return local.astimezone(timezone.utc)
 
 
 def _slot_end_dt(slot: dict) -> datetime:
@@ -43,9 +62,10 @@ def _slot_end_dt(slot: dict) -> datetime:
     duration = slot.get("duration_minutes")
     if duration:
         return _slot_start_dt(slot) + timedelta(minutes=duration)
-    d: datetime = slot["date"]
+    d = _slot_date(slot)
     h, m = map(int, slot["end_time"].split(":"))
-    return d.replace(hour=h, minute=m, second=0, microsecond=0, tzinfo=timezone.utc)
+    local = datetime(d.year, d.month, d.day, h, m, tzinfo=IST)
+    return local.astimezone(timezone.utc)
 
 
 def _build_user_snapshot(user: dict) -> dict:
@@ -95,6 +115,21 @@ async def apply_ban(db: AsyncIOMotorDatabase, user_oid: ObjectId, reason: str) -
 # Availability
 # ---------------------------------------------------------------------------
 
+def _as_utc(value: datetime) -> datetime:
+    """MongoDB always returns naive datetimes representing UTC instants
+    (tzinfo is stripped on write). Serializing that naive value straight to
+    JSON omits any offset/'Z' suffix, so a browser parses it as *local* time
+    instead of UTC — for an IST viewer that silently shifts the calendar day
+    backward by one. Mark it explicitly UTC before it reaches the client so
+    `date.toISOString()`-based day-bucket comparisons on the frontend stay
+    correct regardless of the viewer's timezone. Also tolerates the rare
+    pre-existing slot document where `date` was stored as an ISO string
+    instead of a datetime (see `_slot_date`)."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return ensure_utc(value)
+
+
 def serialize_student_slot(slot: dict) -> dict:
     facility_id = slot.get("facility_id")
     facility_name = slot.get("facility_name")
@@ -105,7 +140,7 @@ def serialize_student_slot(slot: dict) -> dict:
         "facility_id": str(facility_id) if facility_id else None,
         "facility_name": facility_name,
         "sport": slot["sport"],
-        "date": slot["date"],
+        "date": _as_utc(slot["date"]),
         "start_time": slot["start_time"],
         "end_time": slot["end_time"],
         "venue": slot.get("venue") or facility_name or "",
@@ -124,12 +159,33 @@ def serialize_student_slot(slot: dict) -> dict:
 async def list_available_slots(
     db: AsyncIOMotorDatabase,
     sport: str | None = None,
-    date: datetime | None = None,
+    date: date_type | None = None,
     campus: str | None = None,
     venue: str | None = None,
 ) -> list[dict]:
-    if date:
-        await generate_slots_for_date(db, date, campus=campus or "RR")
+    # `date` is a plain calendar date (no time/offset) — the caller (the
+    # student-facing router) requests it as an unambiguous "YYYY-MM-DD" key
+    # so the intended calendar day never depends on the client's timezone.
+    # It's normalized to the same UTC-midnight bucket convention used by the
+    # slot generator (slot_generation_service.normalize_slot_date).
+    slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
+
+    if slot_date:
+        # Slot generation is idempotent (upsert with $setOnInsert), but running
+        # it on every request re-scans all facilities/templates for no reason.
+        # Skip the generation pass once generated slots already exist for this
+        # campus/date; if none exist yet (or a race means none did a moment
+        # ago), generation runs and safely no-ops on any doc created meanwhile.
+        already_generated = await db["slots"].find_one(
+            {
+                "campus": campus or "RR",
+                "date": slot_date,
+                "slot_type": "generated",
+            },
+            {"_id": 1},
+        )
+        if already_generated is None:
+            await generate_slots_for_date(db, slot_date, campus=campus or "RR")
 
     query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
@@ -141,9 +197,9 @@ async def list_available_slots(
             {"venue": {"$regex": venue, "$options": "i"}},
             {"facility_name": {"$regex": venue, "$options": "i"}},
         ]
-    if date:
-        start = date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end   = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if slot_date:
+        start = slot_date
+        end   = slot_date.replace(hour=23, minute=59, second=59, microsecond=999999)
         query["date"] = {"$gte": start, "$lte": end}
 
     slots = await db["slots"].find(query).sort(
@@ -179,7 +235,7 @@ async def create_booking(
     # ── Ban check ────────────────────────────────────────────────────────────
     ban = await check_user_ban(db, user_oid)
     if ban:
-        until = ban["banned_until"].strftime("%d %b %Y, %H:%M UTC")
+        until = ensure_utc(ban["banned_until"]).astimezone(IST).strftime("%d %b %Y, %H:%M IST")
         raise ValueError(f"Your booking access is suspended until {until}.")
 
     # ── Fetch slot ───────────────────────────────────────────────────────────
@@ -189,6 +245,10 @@ async def create_booking(
 
     slot_start = _slot_start_dt(slot)
     slot_end   = _slot_end_dt(slot)
+
+    # ── Expired slots cannot be joined (backend is authoritative) ───────────
+    if slot_end <= now:
+        raise ValueError("This slot has already ended and can no longer be joined.")
 
     # ── Duplicate active participation / rejoin-after-leaving check ─────────
     prior = await db["bookings"].find_one({"user_id": user_oid, "slot_id": slot_oid})
@@ -346,15 +406,15 @@ async def get_user_bookings(
             "sport":        b["sport"],
             "status":       b["status"],
             "booking_date": b["booking_date"],
-            "cancelled_at": b.get("cancelled_at"),
+            "cancelled_at": ensure_utc(b.get("cancelled_at")),
             "notes":        b.get("notes"),
-            "created_at":   b["created_at"],
+            "created_at":   ensure_utc(b["created_at"]),
             "is_leader":    b.get("is_leader", False),
             "is_past":      is_past,
         }
         if slot:
             entry.update({
-                "slot_date":       slot.get("date"),
+                "slot_date":       _as_utc(slot["date"]) if slot.get("date") else None,
                 "slot_start_time": slot.get("start_time"),
                 "slot_end_time":   slot.get("end_time"),
                 "slot_venue":      slot.get("venue"),

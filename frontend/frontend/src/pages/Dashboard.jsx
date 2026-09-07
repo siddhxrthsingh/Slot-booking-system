@@ -4,6 +4,14 @@ import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useOccupancySocket } from '../hooks/useOccupancySocket';
 import {
+  formatDateDMY,
+  formatDateTimeIST,
+  isoDateOnly,
+  istCalendarDate,
+  istDateKey,
+  slotTimeToUtcInstant,
+} from '../utils/datetime';
+import {
   getAvailableSlots,
   createBooking,
   getMyBookings,
@@ -68,13 +76,13 @@ function fmtDate(d) {
   if (!d) return '';
   return new Date(d).toISOString().slice(0, 10);
 }
+// Point-in-time timestamps (joined_at, cancelled_at, banned_until, ...)
+// always render in IST as DD-MM-YYYY, hh:mm AM/PM.
 function fmt(d) {
-  if (!d) return '—';
-  return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return formatDateTimeIST(d);
 }
 function fmtBanDate(d) {
-  if (!d) return '—';
-  return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return formatDateTimeIST(d);
 }
 function initials(name, srn) {
   const source = (name || srn || '').trim();
@@ -130,6 +138,10 @@ export default function Dashboard() {
   // React has a chance to re-render the disabled button state.
   const bookingLockRef = useRef(new Set());
   const cancelLockRef  = useRef(new Set());
+  // Timestamp of the most recent locally-confirmed join. Lets the WebSocket
+  // booking_created handler skip the redundant fetchSlots/fetchMyBookings it
+  // would otherwise trigger for the same join we already refreshed locally.
+  const lastLocalJoinAtRef = useRef(0);
 
   // Click-outside handling for the profile/mobile nav menus.
   const profileRef = useRef(null);
@@ -137,6 +149,11 @@ export default function Dashboard() {
   // Student filters (RR only for now; sport options are derived from the
   // facility-aware slot data returned by the backend, not hardcoded)
   const [filterSport, setFilterSport] = useState('');
+  // Rolling 3-day window: 0 = today, 1 = tomorrow, 2 = day after tomorrow.
+  const [selectedDayOffset, setSelectedDayOffset] = useState(0);
+  // Minute-level tick so expired slots disappear and the rolling window
+  // advances while the page stays open, without polling the backend.
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -190,19 +207,22 @@ export default function Dashboard() {
       // filter dropdown's option list can be derived from the full set of
       // facilities/sports the backend actually returns.
       //
-      // Today and tomorrow are requested explicitly (rather than relying on
-      // an implicit "no date" query) so each request hits the backend's
-      // existing lazy generate_slots_for_date() trigger for that specific
-      // date — otherwise slots for a date are never generated.
-      const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      const [todaySlots, tomorrowSlots] = await Promise.all([
-        getAvailableSlots({ campus: 'RR', date: today.toISOString() }),
-        getAvailableSlots({ campus: 'RR', date: tomorrow.toISOString() }),
+      // Today, tomorrow, and the day after tomorrow — all three computed from
+      // the current date in Asia/Kolkata (this app serves RR campus only),
+      // never the viewer's browser-local timezone — are requested explicitly
+      // (rather than relying on an implicit "no date" query) so each request
+      // hits the backend's existing lazy generate_slots_for_date() trigger
+      // for that specific date — otherwise slots for a date are never
+      // generated. This is exactly the rolling 3-day booking window. Each
+      // request sends a plain "YYYY-MM-DD" key (no time/offset), so the
+      // backend never has to guess which calendar day was intended.
+      const [todaySlots, tomorrowSlots, dayAfterSlots] = await Promise.all([
+        getAvailableSlots({ campus: 'RR', date: istDateKey(0) }),
+        getAvailableSlots({ campus: 'RR', date: istDateKey(1) }),
+        getAvailableSlots({ campus: 'RR', date: istDateKey(2) }),
       ]);
       const byId = new Map();
-      [...todaySlots, ...tomorrowSlots].forEach((s) => byId.set(s.id, s));
+      [...todaySlots, ...tomorrowSlots, ...dayAfterSlots].forEach((s) => byId.set(s.id, s));
       setSlots([...byId.values()]);
       setSlotsError(null);
     } catch {
@@ -275,6 +295,25 @@ export default function Dashboard() {
     if (activePortal === 'admin' && isAdmin) fetchAdminData();
   }, [activePortal, isAdmin, fetchAdminData]);
 
+  // ── Minute-level clock tick ───────────────────────────────────────────────
+  // Drives two things without ever polling the backend: (1) expired slots
+  // disappear from the student view as soon as their end time passes, and
+  // (2) the rolling 3-day window advances automatically at midnight.
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const lastCalendarDayRef = useRef(istDateKey(0));
+  useEffect(() => {
+    const currentDay = istDateKey(0);
+    if (currentDay !== lastCalendarDayRef.current) {
+      lastCalendarDayRef.current = currentDay;
+      setSelectedDayOffset(0);
+      fetchSlots();
+    }
+  }, [nowTick, fetchSlots]);
+
   // Close the profile/mobile nav dropdowns on an outside click so they don't
   // stay open and obscure content after the user has moved on.
   useEffect(() => {
@@ -297,10 +336,20 @@ export default function Dashboard() {
       if (activePortal === 'admin' && isAdmin) fetchAdminData();
     };
     switch (msg.type) {
+      case 'booking_created': {
+        // A join we just made locally already refreshed slots/my-bookings in
+        // handleBook; skip the duplicate here but still keep admin views live.
+        const dedupe = Date.now() - lastLocalJoinAtRef.current < 5000;
+        if (dedupe) {
+          if (activePortal === 'admin' && isAdmin) fetchAdminData();
+        } else {
+          refresh();
+        }
+        break;
+      }
       case 'slot_created':
       case 'slot_updated':
       case 'slot_cancelled':
-      case 'booking_created':
       case 'booking_cancelled':
       case 'booking_updated':
         refresh();
@@ -372,6 +421,9 @@ export default function Dashboard() {
     try {
       await createBooking(slotId);
       showToast('Slot booked and confirmed!');
+      // Mark this as a local join before refreshing so the booking_created
+      // WebSocket event for it (which may arrive mid-refresh) is deduped.
+      lastLocalJoinAtRef.current = Date.now();
       // Refresh both together so the facility list and My Bookings settle in
       // the same render instead of one briefly lagging behind the other.
       await Promise.all([fetchSlots(), fetchMyBookings()]);
@@ -663,11 +715,37 @@ export default function Dashboard() {
   }
 
   // ── Derived data ──────────────────────────────────────────────────────────
-  // Sport filter options come from whatever the backend actually returned —
-  // never a hardcoded sport list. RR only for now.
-  const availableSports = [...new Set(slots.map(s => s.sport))].sort();
+  // The rolling 3-day window: today / tomorrow / day after tomorrow. Recomputed
+  // whenever the minute-tick fires so it always reflects the real calendar day.
+  const rollingDates = useMemo(
+    () => [0, 1, 2].map((offset) => istCalendarDate(offset)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nowTick]
+  );
+  const selectedDateKey = isoDateOnly(rollingDates[selectedDayOffset]);
 
-  const visibleSlots = filterSport ? slots.filter(s => s.sport === filterSport) : slots;
+  // A slot whose end time has passed must disappear from the student view
+  // even while the page stays open — the backend is authoritative (it also
+  // rejects joins for expired slots), this is purely a client-side mirror of
+  // that rule, recomputed on every minute-tick. Slot times are IST wall-clock
+  // (RR campus business hours), so they're resolved to a real UTC instant
+  // before comparing against "now".
+  const nowDate = new Date(nowTick);
+  function isSlotExpired(slot) {
+    return slotTimeToUtcInstant(slot.date, slot.end_time).getTime() <= nowDate.getTime();
+  }
+
+  const slotsForSelectedDay = slots.filter(
+    (s) => isoDateOnly(s.date) === selectedDateKey && !isSlotExpired(s)
+  );
+
+  // Sport filter options come from whatever the backend actually returned for
+  // the selected day — never a hardcoded sport list. RR only for now.
+  const availableSports = [...new Set(slotsForSelectedDay.map(s => s.sport))].sort();
+
+  const visibleSlots = filterSport
+    ? slotsForSelectedDay.filter(s => s.sport === filterSport)
+    : slotsForSelectedDay;
 
   // Group by individual facility (not just by sport) using facility_id from
   // the facility-aware API response, falling back to facility_name for any
@@ -695,18 +773,26 @@ export default function Dashboard() {
     }),
   })).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
 
-  // `is_past` is computed server-side (backend is authoritative for slot
-  // end-time comparisons) — a booking is "active/upcoming" only while it is
-  // neither cancelled nor past; everything else goes to history.
-  const activeBookings = myBookings.filter(b => b.status !== 'cancelled' && !b.is_past);
-  const historyBookings = myBookings.filter(b => b.status === 'cancelled' || b.is_past);
+  // `is_past` is computed server-side at fetch time, so without a fresh
+  // fetch it goes stale as the clock moves past a slot's end time while the
+  // page stays open. Recompute it from the booking's own slot_date/
+  // slot_end_time against the live nowTick (same IST resolution as
+  // isSlotExpired above) so a booking moves from active to History on its
+  // own, without a refetch — falling back to the server's is_past when the
+  // slot fields aren't present (e.g. slot since deleted).
+  function isBookingPast(b) {
+    if (!b.slot_date || !b.slot_end_time) return b.is_past;
+    return slotTimeToUtcInstant(b.slot_date, b.slot_end_time).getTime() <= nowDate.getTime();
+  }
+  const activeBookings = myBookings.filter(b => b.status !== 'cancelled' && !isBookingPast(b));
+  const historyBookings = myBookings.filter(b => b.status === 'cancelled' || isBookingPast(b));
   // Derived purely from existing state (myBookings) — not a new backend
   // rule — so slot cards can show "Joined" instead of "Join" for slots the
   // student already has an active participation in.
   const joinedSlotIds = new Set(activeBookings.map(b => b.slot_id));
-  const todayKey = fmtDate(new Date());
+  const todayKey = istDateKey(0);
   const todaysActiveCount = activeBookings.filter(
-    b => b.slot_date && fmtDate(b.slot_date) === todayKey
+    b => b.slot_date && isoDateOnly(b.slot_date) === todayKey
   ).length;
 
   const metricCards = metrics
@@ -815,7 +901,7 @@ export default function Dashboard() {
                 <div>
                   <p className="sd-hero-card-label">Today</p>
                   <p className="sd-hero-card-value">
-                    {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long' })}
+                    {new Date().toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' })}, {formatDateDMY(istCalendarDate(0))}
                   </p>
                 </div>
                 <div>
@@ -847,6 +933,24 @@ export default function Dashboard() {
                 <p className="sd-section-eyebrow">Explore facilities</p>
                 <h2 className="sd-section-title">Pick a sport, pick a slot</h2>
                 <p className="sd-section-meta">📍 PES University, RR Campus</p>
+              </div>
+
+              <div className="sd-chip-row" role="tablist" aria-label="Select day">
+                {rollingDates.map((d, i) => {
+                  const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : 'Day after tomorrow';
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedDayOffset === i}
+                      className={`sd-chip ${selectedDayOffset === i ? 'active' : ''}`}
+                      onClick={() => setSelectedDayOffset(i)}
+                    >
+                      {label} — {formatDateDMY(d)}
+                    </button>
+                  );
+                })}
               </div>
 
               <div className="sd-chip-row">
@@ -973,7 +1077,7 @@ export default function Dashboard() {
                           </span>
                         </div>
                         <p className="sd-booking-meta">
-                          🕒 {bk.slot_date ? fmtDate(bk.slot_date) : '—'}
+                          🕒 {bk.slot_date ? formatDateDMY(bk.slot_date) : '—'}
                           {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
                         </p>
                         <p className="sd-booking-meta">
@@ -1030,7 +1134,7 @@ export default function Dashboard() {
                           </span>
                         </div>
                         <p className="sd-booking-meta">
-                          🕒 {bk.slot_date ? fmtDate(bk.slot_date) : '—'}
+                          🕒 {bk.slot_date ? formatDateDMY(bk.slot_date) : '—'}
                           {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
                         </p>
                         <p className="sd-booking-meta">
@@ -1531,7 +1635,7 @@ export default function Dashboard() {
                             <p className="ad-row-sub">{sl.campus} · {sl.venue}</p>
                           </div>
                           <div className="ad-row-main">
-                            <strong>{fmtDate(sl.date)}</strong>
+                            <strong>{formatDateDMY(sl.date)}</strong>
                             <p className="ad-row-sub">{sl.start_time}–{sl.end_time}</p>
                           </div>
                           <div className="ad-occupancy">
@@ -1582,7 +1686,7 @@ export default function Dashboard() {
                       </div>
                       <div className="ad-row-main">
                         <strong>{bk.sport}</strong>
-                        <p className="ad-row-sub">{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p>
+                        <p className="ad-row-sub">{bk.slot ? `${formatDateDMY(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p>
                       </div>
                       <span className="ad-pill ad-pill-neutral">Pending</span>
                       <div className="ad-btn-row">
@@ -1616,7 +1720,7 @@ export default function Dashboard() {
                       </div>
                       <div className="ad-row-main">
                         <strong>{bk.sport}</strong>
-                        <p className="ad-row-sub">{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
+                        <p className="ad-row-sub">{bk.slot ? `${formatDateDMY(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
                       </div>
                       <span className="ad-pill ad-pill-neutral">{fmtStatus(bk.status)}</span>
                       <span className="ad-row-sub">{fmt(bk.created_at)}</span>
@@ -1707,7 +1811,7 @@ export default function Dashboard() {
                       </div>
                       <div>
                         <p className="ad-roster-summary-label">Date / time</p>
-                        <p className="ad-roster-summary-value">{fmtDate(slot.date)}, {slot.start_time}–{slot.end_time}</p>
+                        <p className="ad-roster-summary-value">{formatDateDMY(slot.date)}, {slot.start_time}–{slot.end_time}</p>
                       </div>
                       <div>
                         <p className="ad-roster-summary-label">Occupancy</p>
