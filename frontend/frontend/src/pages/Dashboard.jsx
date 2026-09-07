@@ -38,6 +38,21 @@ const upcomingEvents = [
 const SPORTS_LIST = ['Football', 'Basketball', 'Cricket', 'Badminton', 'Volleyball', 'Squash', 'Table Tennis', 'Chess'];
 const CAMPUSES    = ['RR', 'EC'];
 
+// Maps a sport name (as returned by the backend) to an existing real sport
+// photo for the facility card header. Purely a presentational asset choice —
+// it does not add sports/facilities to the bookable inventory, which still
+// comes entirely from the API.
+const SPORT_IMAGES = {
+  Badminton:      '/images/badminton.jpg',
+  Basketball:     '/images/basketball.jpg',
+  'Table Tennis': '/images/table-tennis.jpg',
+  Squash:         '/images/squash.jpg',
+  Volleyball:     '/images/volleyball.jpg',
+};
+const DEFAULT_FACILITY_IMAGE = '/images/pesu-campus.jpg';
+
+const MAX_ACTIVE_SLOTS_PER_DAY = 2; // mirrors the backend's locked daily-quota rule
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtStatus(s) {
   return (s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -53,6 +68,14 @@ function fmt(d) {
 function fmtBanDate(d) {
   if (!d) return '—';
   return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function initials(name, srn) {
+  const source = (name || srn || '').trim();
+  if (!source) return '—';
+  const parts = source.split(/\s+/);
+  return parts.length > 1
+    ? (parts[0][0] + parts[1][0]).toUpperCase()
+    : source.slice(0, 2).toUpperCase();
 }
 
 // ── Blank slot form ───────────────────────────────────────────────────────────
@@ -84,6 +107,8 @@ export default function Dashboard() {
   // Student filters (RR only for now; sport options are derived from the
   // facility-aware slot data returned by the backend, not hardcoded)
   const [filterSport, setFilterSport] = useState('');
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   // ── Admin state ───────────────────────────────────────────────────────────
   const [metrics,           setMetrics]           = useState(null);
@@ -220,8 +245,9 @@ export default function Dashboard() {
     try {
       await createBooking(slotId);
       showToast('Slot booked and confirmed!');
-      fetchSlots();
-      fetchMyBookings();
+      // Refresh both together so the facility list and My Bookings settle in
+      // the same render instead of one briefly lagging behind the other.
+      await Promise.all([fetchSlots(), fetchMyBookings()]);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not book slot.', false);
     } finally {
@@ -240,8 +266,9 @@ export default function Dashboard() {
       } else {
         showToast('Booking cancelled.');
       }
-      fetchMyBookings();
-      fetchSlots();
+      // Refresh both together so the facility list and My Bookings settle in
+      // the same render instead of one briefly lagging behind the other.
+      await Promise.all([fetchMyBookings(), fetchSlots()]);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not cancel booking.', false);
     } finally {
@@ -393,6 +420,16 @@ export default function Dashboard() {
     }),
   })).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
 
+  const activeBookings = myBookings.filter(b => b.status !== 'cancelled');
+  // Derived purely from existing state (myBookings) — not a new backend
+  // rule — so slot cards can show "Joined" instead of "Join" for slots the
+  // student already has an active participation in.
+  const joinedSlotIds = new Set(activeBookings.map(b => b.slot_id));
+  const todayKey = fmtDate(new Date());
+  const todaysActiveCount = activeBookings.filter(
+    b => b.slot_date && fmtDate(b.slot_date) === todayKey
+  ).length;
+
   const metricCards = metrics
     ? [
         { label: 'Active slots',       value: metrics.slots.active ?? (metrics.slots.open + metrics.slots.full) },
@@ -423,6 +460,300 @@ export default function Dashboard() {
     boxSizing: 'border-box',
   };
 
+  if (isStudent) {
+    return (
+      <div className="sd-shell">
+        {/* ── Top navigation (full-bleed, sticky + blurred like the v0 reference) ── */}
+        <header className="sd-nav">
+          <div className="sd-nav-inner">
+            <div className="sd-brand">
+              <img src="/pesu-compass-mark.webp" alt="PES University" className="sd-brand-mark" />
+              <div className="sd-brand-text">
+                <strong>SPORTS HUB</strong>
+              </div>
+            </div>
+            <nav className="sd-nav-links">
+              <a href="#discover">Discover</a>
+              <a href="#my-bookings">My bookings</a>
+              <button type="button" onClick={() => showToast('For help with bookings, contact your sports coordinator.')}>
+                Help
+              </button>
+            </nav>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                className="sd-nav-toggle"
+                type="button"
+                aria-label="Open menu"
+                onClick={() => setMobileNavOpen(o => !o)}
+              >
+                ☰
+              </button>
+              <div className="sd-profile">
+                <button className="sd-profile-trigger" type="button" onClick={() => setProfileOpen(o => !o)}>
+                  <span className="sd-avatar">{initials(user?.name, user?.srn)}</span>
+                  <span className="sd-profile-name">
+                    <strong>{user?.name || user?.srn}</strong>
+                    <span>{user?.srn}</span>
+                  </span>
+                  <span aria-hidden="true" style={{ color: 'var(--sd-muted)' }}>▾</span>
+                </button>
+                {profileOpen && (
+                  <div className="sd-profile-menu">
+                    <button type="button" onClick={handleLogout}>Sign out</button>
+                  </div>
+                )}
+                {mobileNavOpen && (
+                  <div className="sd-mobile-menu">
+                    <a href="#discover" onClick={() => setMobileNavOpen(false)}>Discover</a>
+                    <a href="#my-bookings" onClick={() => setMobileNavOpen(false)}>My bookings</a>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileNavOpen(false);
+                        showToast('For help with bookings, contact your sports coordinator.');
+                      }}
+                    >
+                      Help
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <div className="sd-inner">
+          {/* ── Hero ── */}
+          <section className="sd-hero">
+            <div>
+              <span className="sd-eyebrow-chip">🏅 Open courts, better days</span>
+              <h1 className="sd-hero-title">
+                Find your next <em>game.</em>
+              </h1>
+              <p className="sd-hero-sub">
+                Reserve a spot, join fellow students, and make the most of RR campus.
+                {user?.name ? ` Welcome back, ${user.name.split(' ')[0]}.` : ''}
+              </p>
+            </div>
+            <div className="sd-hero-card">
+              <div className="sd-hero-card-icon">📅</div>
+              <div className="sd-hero-card-body">
+                <div>
+                  <p className="sd-hero-card-label">Today</p>
+                  <p className="sd-hero-card-value">
+                    {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long' })}
+                  </p>
+                </div>
+                <div>
+                  <p className="sd-hero-card-label">Daily limit</p>
+                  <p className="sd-hero-card-value">{todaysActiveCount}/{MAX_ACTIVE_SLOTS_PER_DAY} slots</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {toast && (
+            <div className={`sd-notice ${toast.ok ? 'sd-notice-ok' : 'sd-notice-err'}`} role="status">
+              <span>{toast.ok ? '✓' : '⚠️'} {toast.msg}</span>
+              <button className="sd-notice-dismiss" type="button" aria-label="Dismiss notification" onClick={() => setToast(null)}>✕</button>
+            </div>
+          )}
+
+          {banInfo && (
+            <div className="sd-ban-banner">
+              ⚠️ <strong>Booking suspended</strong> until{' '}
+              <strong>{fmtBanDate(banInfo.banned_until)}</strong> — {banInfo.reason}
+            </div>
+          )}
+
+          {/* ── Main layout: facility discovery + my bookings sidebar ── */}
+          <div className="sd-layout">
+            <div id="discover">
+              <div className="sd-section-head">
+                <p className="sd-section-eyebrow">Explore facilities</p>
+                <h2 className="sd-section-title">Pick a sport, pick a slot</h2>
+                <p className="sd-section-meta">📍 PES University, RR Campus</p>
+              </div>
+
+              <div className="sd-chip-row">
+                <button
+                  type="button"
+                  className={`sd-chip ${!filterSport ? 'active' : ''}`}
+                  onClick={() => setFilterSport('')}
+                >
+                  All sports
+                </button>
+                {availableSports.map(s => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`sd-chip ${filterSport === s ? 'active' : ''}`}
+                    onClick={() => setFilterSport(s)}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+
+              {slotsLoading ? (
+                <p className="sd-empty">Loading slots…</p>
+              ) : facilityGroups.length === 0 ? (
+                <p className="sd-empty">No slots available right now.</p>
+              ) : (
+                <div className="sd-facility-grid">
+                  {facilityGroups.map((group) => {
+                    const openSlots = group.slots.filter(
+                      sl => sl.status !== 'full' && sl.available_count > 0
+                    ).length;
+                    return (
+                      <article className="sd-facility-card" key={group.key}>
+                        <div
+                          className="sd-facility-image"
+                          style={{ backgroundImage: `url("${SPORT_IMAGES[group.sport] || DEFAULT_FACILITY_IMAGE}")` }}
+                        >
+                          <span className="sd-facility-tag">{group.sport}</span>
+                          <p className="sd-facility-name">{group.facilityName}</p>
+                        </div>
+                        <div className="sd-facility-body">
+                          <p className="sd-facility-location">📍 RR Campus</p>
+                          {group.slots.length > 0 ? (
+                            <div className="sd-slot-list">
+                              {group.slots.map((sl) => {
+                                const isJoined = joinedSlotIds.has(sl.id);
+                                const isFull = !isJoined && (sl.status === 'full' || sl.available_count === 0);
+                                return (
+                                  <div className={`sd-slot-row ${isJoined ? 'sd-slot-row-joined' : ''}`} key={sl.id}>
+                                    <div>
+                                      <p className="sd-slot-time">🕒 {sl.start_time} – {sl.end_time}</p>
+                                      <p className="sd-slot-meta">{sl.booked_count}/{sl.capacity} joined</p>
+                                    </div>
+                                    {isJoined ? (
+                                      <span className="sd-joined-pill">✓ Joined</span>
+                                    ) : isFull ? (
+                                      <span className="sd-full-pill">Full</span>
+                                    ) : (
+                                      <button
+                                        className="sd-join-btn"
+                                        type="button"
+                                        disabled={!!banInfo || bookingInProgress === sl.id}
+                                        onClick={() => handleBook(sl.id)}
+                                      >
+                                        {bookingInProgress === sl.id ? 'Joining…' : '+ Join'}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="sd-empty">No slots available</p>
+                          )}
+                          <div className="sd-facility-footer">
+                            {openSlots > 0 ? (
+                              <span className="sd-availability-ok">{openSlots} slot{openSlots !== 1 ? 's' : ''} available</span>
+                            ) : (
+                              <span className="sd-availability-none">No slots available</span>
+                            )}
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* ── My bookings sidebar ── */}
+            <aside className="sd-sidebar" id="my-bookings">
+              <div className="sd-card">
+                <div className="sd-card-head">
+                  <div>
+                    <p className="sd-section-eyebrow">Your schedule</p>
+                    <h3 className="sd-section-title" style={{ fontSize: '1.15rem' }}>My bookings</h3>
+                  </div>
+                </div>
+
+                {bookingsLoading ? (
+                  <p className="sd-empty">Loading…</p>
+                ) : activeBookings.length === 0 ? (
+                  <p className="sd-empty">No active bookings yet. Join a slot to get started!</p>
+                ) : (
+                  <div className="sd-booking-list">
+                    {activeBookings.map((bk) => (
+                      <div className="sd-booking-item" key={bk.id}>
+                        <div className="sd-booking-item-head">
+                          <span className="sd-booking-sport">
+                            <span className="sd-dot" />
+                            {bk.sport}
+                            {bk.is_leader && <span className="sd-leader-badge">Leader</span>}
+                          </span>
+                        </div>
+                        <p className="sd-booking-meta">
+                          🕒 {bk.slot_date ? fmtDate(bk.slot_date) : '—'}
+                          {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
+                        </p>
+                        <p className="sd-booking-meta">
+                          📍 {bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}
+                        </p>
+                        <div className="sd-booking-footer">
+                          <span className="sd-status-confirmed">✓ {fmtStatus(bk.status)}</span>
+                          <div className="sd-booking-footer-right">
+                            <span className="sd-booking-id">#{bk.id.slice(-4)}</span>
+                            <button
+                              className="sd-leave-btn"
+                              type="button"
+                              disabled={cancelInProgress === bk.id}
+                              onClick={() => handleCancel(bk.id)}
+                            >
+                              {cancelInProgress === bk.id ? 'Leaving…' : (<>↪ Leave slot</>)}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="sd-note-box">
+                  <span>ℹ️</span>
+                  <span>
+                    You can join up to {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day. Leave a slot early if your plans change.
+                  </span>
+                </div>
+              </div>
+            </aside>
+          </div>
+
+          {/* ── Announcements / events (existing content, restyled) ── */}
+          <div className="sd-extras">
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <h3 className="sd-section-title" style={{ fontSize: '1.05rem' }}>Announcements</h3>
+              </div>
+              <ul>{announcements.map(a => <li key={a}>{a}</li>)}</ul>
+            </div>
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <h3 className="sd-section-title" style={{ fontSize: '1.05rem' }}>Upcoming events</h3>
+              </div>
+              {upcomingEvents.map(ev => (
+                <div className="sd-event-row" key={ev.title}>
+                  <strong>{ev.title}</strong>
+                  <span>{ev.time}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <footer className="sd-footer">
+            <span>Built for better campus days.</span>
+            <a href="#discover" style={{ color: 'inherit', textDecoration: 'none' }}>Back to top ↑</a>
+          </footer>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <main className="dashboard">
       {/* Toast */}
@@ -437,18 +768,10 @@ export default function Dashboard() {
           <h1 className="brand-title">Campus Arena</h1>
         </div>
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
-          {/* Admins only see the Admin Panel label; students only see Student Portal */}
           <div className="portal-switch" role="tablist">
-            {!isAdmin && (
-              <button className="switch-chip active" type="button" disabled>
-                Student Portal
-              </button>
-            )}
-            {isAdmin && (
-              <button className="switch-chip active" type="button" disabled>
-                Admin Panel
-              </button>
-            )}
+            <button className="switch-chip active" type="button" disabled>
+              Admin Panel
+            </button>
           </div>
           <div style={{ textAlign: 'right' }}>
             <p style={{ margin: 0, color: '#f5f3ff', fontWeight: 700, fontSize: '0.9rem' }}>
@@ -467,17 +790,13 @@ export default function Dashboard() {
           className="hero-copy hero-media"
           style={{ backgroundImage: 'linear-gradient(135deg, rgba(5,8,20,0.84), rgba(93,63,211,0.48)), url("/images/football-hero.jpg")' }}
         >
-          <p className="eyebrow">{isStudent ? 'Student Sports Access' : 'Admin Control'}</p>
-          <h2 className="hero-title">
-            {isStudent
-              ? 'Reserve college sports slots and manage bookings in one place.'
-              : 'Create, update, and monitor campus sports slots in real time.'}
-          </h2>
+          <p className="eyebrow">Admin Control</p>
+          <h2 className="hero-title">Create, update, and monitor campus sports slots in real time.</h2>
           <div className="hero-stats">
             <div><strong>{metrics?.slots.open ?? slots.length}</strong><span>Available slots</span></div>
             <div>
-              <strong>{isStudent ? myBookings.filter(b => b.status !== 'cancelled').length : (metrics ? `${metrics.occupancy_pct}%` : '—')}</strong>
-              <span>{isStudent ? 'My active bookings' : 'Occupancy'}</span>
+              <strong>{metrics ? `${metrics.occupancy_pct}%` : '—'}</strong>
+              <span>Occupancy</span>
             </div>
             <div><strong>Live</strong><span>Real-time updates</span></div>
           </div>
@@ -486,206 +805,13 @@ export default function Dashboard() {
           className="hero-highlight hero-media"
           style={{ backgroundImage: 'linear-gradient(180deg, rgba(12,14,30,0.3), rgba(12,14,30,0.88)), url("/images/pesu-campus.jpg")' }}
         >
-          <span className="highlight-label">{isStudent ? 'Your session' : 'Operations snapshot'}</span>
-          <h2>
-            {isStudent
-              ? `Welcome back, ${user?.name?.split(' ')[0] || user?.srn}.`
-              : 'Slot management and live occupancy tracking.'}
-          </h2>
+          <span className="highlight-label">Operations snapshot</span>
+          <h2>Slot management and live occupancy tracking.</h2>
           <p style={{ color: '#cbd5ff' }}>
-            {isStudent
-              ? `${user?.branch ? user.branch + ' · ' : ''}${user?.campus ? user.campus + ' Campus' : ''}`
-              : `${activeBans.length} active ban${activeBans.length !== 1 ? 's' : ''} · ${metrics?.bookings.total ?? 0} total bookings`}
+            {activeBans.length} active ban{activeBans.length !== 1 ? 's' : ''} · {metrics?.bookings.total ?? 0} total bookings
           </p>
         </div>
       </section>
-
-      {/* ══ STUDENT PORTAL ══════════════════════════════════════════════════ */}
-      {isStudent && (
-        <>
-          {/* Ban Banner */}
-          {banInfo && (
-            <div style={{
-              background: 'rgba(192,57,43,0.18)', border: '1px solid #c0392b',
-              borderRadius: '16px', padding: '16px 20px', margin: '0 0 24px',
-              color: '#ff7c7c',
-            }}>
-              ⚠️ <strong>Booking suspended</strong> until{' '}
-              <strong>{fmtBanDate(banInfo.banned_until)}</strong> — {banInfo.reason}
-            </div>
-          )}
-
-          {/* Filters */}
-          <section style={{ marginBottom: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <p className="eyebrow" style={{ margin: 0, marginRight: '4px' }}>Filter:</p>
-            <span className="slot-pill" style={{ padding: '10px 16px' }}>RR Campus</span>
-            <select style={{ ...inp, width: 'auto', padding: '10px 16px' }} value={filterSport} onChange={e => setFilterSport(e.target.value)}>
-              <option value="">All Sports</option>
-              {availableSports.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            {filterSport && (
-              <button className="secondary-button" type="button" style={{ padding: '10px 16px' }} onClick={() => setFilterSport('')}>
-                Clear
-              </button>
-            )}
-          </section>
-
-          {/* Facility Cards */}
-          <section className="sports-section">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Available Facilities</p>
-                <h2>View and book slots by facility</h2>
-              </div>
-              <p className="section-copy">Live slot counts. Auto-confirmed on booking.</p>
-            </div>
-
-            {slotsLoading ? (
-              <p style={{ color: '#cbd5ff', textAlign: 'center', padding: '40px 0' }}>Loading slots…</p>
-            ) : facilityGroups.length === 0 ? (
-              <p style={{ color: '#cbd5ff', textAlign: 'center', padding: '40px 0' }}>No slots available.</p>
-            ) : (
-              <div className="sports-grid">
-                {facilityGroups.map((group) => {
-                  const totalAvail = group.slots.reduce((s, sl) => s + sl.available_count, 0);
-                  return (
-                    <article className="sport-card" key={group.key}>
-                      <div className="sport-content">
-                        <div className="sport-header">
-                          <div>
-                            <h3>{group.facilityName}</h3>
-                            <p className="venue">{group.sport}</p>
-                          </div>
-                          <span className="sport-badge" style={{ position: 'static' }}>
-                            {totalAvail > 0 ? `${totalAvail} seats available` : 'No seats available'}
-                          </span>
-                        </div>
-                        {group.slots.length > 0 ? (
-                          <div style={{ display: 'grid', gap: '8px' }}>
-                            {group.slots.map((sl) => {
-                              const isFull = sl.status === 'full' || sl.available_count === 0;
-                              return (
-                                <div
-                                  key={sl.id}
-                                  style={{
-                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                    gap: '10px', padding: '10px 12px', borderRadius: '12px',
-                                    background: 'rgba(7,10,20,0.6)', border: '1px solid rgba(167,139,250,0.14)',
-                                  }}
-                                >
-                                  <div>
-                                    <span className="slot-pill">{sl.start_time}–{sl.end_time}</span>
-                                    <p style={{ margin: '6px 0 0', fontSize: '0.78rem', color: '#8899cc' }}>
-                                      {sl.booked_count}/{sl.capacity} booked · {sl.available_count} available
-                                    </p>
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                    <span
-                                      className="status-chip"
-                                      style={{
-                                        background: isFull ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
-                                        color: isFull ? '#f87171' : '#4ade80',
-                                      }}
-                                    >
-                                      {isFull ? 'Full' : 'Open'}
-                                    </span>
-                                    <button
-                                      className="primary-button"
-                                      type="button"
-                                      disabled={!!banInfo || bookingInProgress === sl.id || isFull}
-                                      onClick={() => handleBook(sl.id)}
-                                      style={{ fontSize: '0.85rem', padding: '9px 14px' }}
-                                    >
-                                      {bookingInProgress === sl.id ? 'Booking…' : 'Book'}
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <button className="secondary-button" type="button" disabled>No slots available</button>
-                        )}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {/* My Bookings + Announcements */}
-          <section className="content-grid">
-            <article className="panel">
-              <div className="panel-header">
-                <p className="eyebrow">My Bookings</p>
-                <h3>Manage upcoming reservations</h3>
-              </div>
-              {bookingsLoading ? (
-                <p style={{ color: '#cbd5ff' }}>Loading…</p>
-              ) : myBookings.filter(b => b.status !== 'cancelled').length === 0 ? (
-                <p style={{ color: '#cbd5ff' }}>No active bookings yet. Book a slot above!</p>
-              ) : (
-                <div className="booking-list">
-                  {myBookings.filter(b => b.status !== 'cancelled').map((bk) => (
-                    <div className="booking-row" key={bk.id}>
-                      <div>
-                        <strong>
-                          {bk.sport}
-                          {bk.is_leader && (
-                            <span className="status-chip" style={{ marginLeft: '8px', fontSize: '0.7rem' }}>
-                              Leader
-                            </span>
-                          )}
-                        </strong>
-                        <p>{bk.slot_date ? fmtDate(bk.slot_date) : '—'}{bk.slot_start_time ? `, ${bk.slot_start_time}–${bk.slot_end_time}` : ''}</p>
-                        {/* Facility name (venue is set to the facility name for
-                            facility-aware slots); campus shown alongside it. */}
-                        <span>{bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}</span>
-                      </div>
-                      <div className="booking-actions">
-                        <span className="status-chip">{fmtStatus(bk.status)}</span>
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={cancelInProgress === bk.id}
-                          onClick={() => handleCancel(bk.id)}
-                        >
-                          {cancelInProgress === bk.id ? 'Cancelling…' : 'Cancel'}
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </article>
-
-            <article className="panel stacked-panel">
-              <div>
-                <div className="panel-header">
-                  <p className="eyebrow">Announcements</p>
-                  <h3>Notice board</h3>
-                </div>
-                <ul className="info-list">{announcements.map(a => <li key={a}>{a}</li>)}</ul>
-              </div>
-              <div>
-                <div className="panel-header section-gap">
-                  <p className="eyebrow">Upcoming Events</p>
-                  <h3>Campus sports calendar</h3>
-                </div>
-                <div className="event-list">
-                  {upcomingEvents.map(ev => (
-                    <div className="event-row" key={ev.title}>
-                      <strong>{ev.title}</strong>
-                      <span>{ev.time}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </article>
-          </section>
-        </>
-      )}
 
       {/* ══ ADMIN PORTAL ════════════════════════════════════════════════════ */}
       {!isStudent && isAdmin && (
