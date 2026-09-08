@@ -2,6 +2,7 @@
 Auth service: PESUAuth integration, admin login, JWT generation, session management.
 """
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +124,23 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
             return None
 
         if response.status_code != 200:
+            logger.error(
+                "PESUAuth returned unexpected status code: %s",
+                response.status_code,
+            )
             raise httpx.RequestError(
                 f"PESUAuth returned unexpected status {response.status_code}"
             )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.error(
+                "PESUAuth response JSON parsing failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            raise
         if not data.get("status"):
             return None
 
@@ -151,7 +165,12 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
             "section":  raw.get("section"),
         }
 
-    except httpx.RequestError:
+    except httpx.RequestError as exc:
+        logger.error(
+            "PESUAuth request failed: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         # Dev-only bypass: lets you test locally without hitting the real API.
         # Disabled automatically when APP_ENV=production.
         if settings.app_env == "development":
