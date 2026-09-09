@@ -125,6 +125,10 @@ class FakeCollection:
         for keys in self.unique_keys:
             key_values = tuple(doc.get(k) for k in keys)
             for existing in self.docs:
+                if existing.get("status") == "cancelled":
+                    # Mirrors the real partial unique index, which only
+                    # covers non-cancelled (active) bookings.
+                    continue
                 if tuple(existing.get(k) for k in keys) == key_values:
                     raise DuplicateKeyError("duplicate key")
         doc.setdefault("_id", ObjectId())
@@ -302,7 +306,7 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await create_booking(db, user=user, slot_id=str(slot["_id"]))
 
-    async def test_rejoin_after_leaving_same_slot_rejected(self):
+    async def test_rejoin_after_late_cancel_same_slot_rejected(self):
         slot = make_slot()
         user = make_user()
         db = FakeDb(
@@ -313,12 +317,33 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
                 "user_id": user["_id"],
                 "slot_id": slot["_id"],
                 "status": "cancelled",
+                "late_cancel": True,
+                "joined_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
             }],
         )
 
         with self.assertRaises(ValueError) as ctx:
             await create_booking(db, user=user, slot_id=str(slot["_id"]))
         self.assertIn("cannot rejoin", str(ctx.exception))
+
+    async def test_rejoin_after_early_cancel_same_slot_allowed(self):
+        slot = make_slot()
+        user = make_user()
+        db = FakeDb(
+            slots=[slot],
+            facilities=[make_facility(slot, 6)],
+            bookings=[{
+                "_id": ObjectId(),
+                "user_id": user["_id"],
+                "slot_id": slot["_id"],
+                "status": "cancelled",
+                "late_cancel": False,
+                "joined_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
+            }],
+        )
+
+        booking = await create_booking(db, user=user, slot_id=str(slot["_id"]))
+        self.assertEqual(booking["status"], "confirmed")
 
     async def test_daily_two_active_slot_limit_enforced(self):
         date = future_date()

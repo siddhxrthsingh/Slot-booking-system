@@ -6,7 +6,10 @@ Join policy (Phase 3 Step 1B):
   - Multiple students may join the same slot (shared slots).
   - First active participant becomes the leader (leader_user_id / is_leader).
   - A user cannot hold two ACTIVE participations in the same slot.
-  - A user who has previously left/cancelled a slot cannot rejoin it.
+  - A user who left/cancelled a slot BEFORE the cancellation deadline may
+    rejoin it later (subject to normal eligibility). A user whose leave was
+    a LATE cancellation (within the deadline, triggering the ban) cannot
+    rejoin that same slot.
   - Maximum 2 ACTIVE slots per calendar day per student, across all sports/facilities.
   - Active bookings for the same student must not overlap in time.
   - Banned students cannot make new bookings until the ban expires.
@@ -251,11 +254,17 @@ async def create_booking(
         raise ValueError("This slot has already ended and can no longer be joined.")
 
     # ── Duplicate active participation / rejoin-after-leaving check ─────────
-    prior = await db["bookings"].find_one({"user_id": user_oid, "slot_id": slot_oid})
+    # Only the most recent booking for this user+slot matters: an early
+    # (non-late) cancellation no longer permanently blocks rejoining, but a
+    # late cancellation that triggered the ban still does.
+    prior_cursor = db["bookings"].find({"user_id": user_oid, "slot_id": slot_oid}).sort("joined_at", -1)
+    prior_list = await prior_cursor.to_list(length=1)
+    prior = prior_list[0] if prior_list else None
     if prior:
         if prior["status"] != "cancelled":
             raise ValueError("You have already joined this slot.")
-        raise ValueError("You have already left this slot and cannot rejoin it.")
+        if prior.get("late_cancel"):
+            raise ValueError("You have already left this slot and cannot rejoin it.")
 
     # ── Maximum 2 ACTIVE slots per calendar day (all sports/facilities) ─────
     day_start = slot_start.replace(hour=0, minute=0, second=0, microsecond=0)

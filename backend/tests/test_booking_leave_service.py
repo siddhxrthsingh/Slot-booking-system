@@ -233,17 +233,35 @@ class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
             await create_booking(db, user=user, slot_id=str(other_slot["_id"]))
         self.assertIn("suspended", str(ctx.exception))
 
-    async def test_cancelled_participant_cannot_rejoin_same_slot(self):
+    async def test_early_cancel_participant_can_rejoin_same_slot(self):
         slot = make_slot()
         user = make_user()
         db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)])
         booking = await create_booking(db, user=user, slot_id=str(slot["_id"]))
 
-        await cancel_booking(db, str(booking["_id"]), str(user["_id"]))
+        cancelled = await cancel_booking(db, str(booking["_id"]), str(user["_id"]))
+        self.assertFalse(cancelled["late_cancel"])
+
+        rejoined = await create_booking(db, user=user, slot_id=str(slot["_id"]))
+        self.assertEqual(rejoined["status"], "confirmed")
+
+    async def test_late_cancel_participant_blocked_from_rejoining_while_banned(self):
+        started = datetime.now(IST) - timedelta(minutes=15)
+        slot = make_slot(
+            date=started.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
+            start_time=started.strftime("%H:%M"),
+            end_time=(started + timedelta(hours=1)).strftime("%H:%M"),
+        )
+        user = make_user()
+        db = FakeDb(slots=[slot], facilities=[make_facility(slot, 6)])
+        booking = await create_booking(db, user=user, slot_id=str(slot["_id"]))
+
+        cancelled = await cancel_booking(db, str(booking["_id"]), str(user["_id"]))
+        self.assertTrue(cancelled["late_cancel"])
 
         with self.assertRaises(ValueError) as ctx:
             await create_booking(db, user=user, slot_id=str(slot["_id"]))
-        self.assertIn("cannot rejoin", str(ctx.exception))
+        self.assertIn("suspended", str(ctx.exception))
 
     async def test_leaving_already_started_slot_is_treated_as_late_cancel(self):
         started = datetime.now(IST) - timedelta(minutes=15)

@@ -64,10 +64,16 @@ async def main():
     print("  ✓ slots indexes")
 
     # Bookings
-    # A user may have at most one booking document per slot, ever (rejoin
-    # after leaving is blocked by product rule) — this also closes the
-    # concurrent-duplicate-join race at the database layer.
-    await db["bookings"].create_index([("user_id", 1), ("slot_id", 1)], unique=True)
+    # A user may have at most one ACTIVE (non-cancelled) booking document per
+    # slot at a time — this closes the concurrent-duplicate-join race at the
+    # database layer. Cancelled bookings are exempt so a user who left before
+    # the late-cancellation deadline can later rejoin the same slot with a
+    # new booking document, while all prior cancelled records are preserved.
+    await db["bookings"].create_index(
+        [("user_id", 1), ("slot_id", 1)],
+        unique=True,
+        partialFilterExpression={"status": {"$ne": "cancelled"}},
+    )
     await db["bookings"].create_index([("user_id", 1), ("status", 1)])
     await db["bookings"].create_index([("slot_id", 1), ("status", 1)])
     await db["bookings"].create_index("status")
