@@ -44,6 +44,14 @@ class _FakeClient:
 class SetupDbIndexTests(unittest.TestCase):
     def _run_main_and_collect_calls(self):
         calls = []
+        # setup_db.py does `from motor.motor_asyncio import AsyncIOMotorClient`,
+        # binding its own module-level name at import time. The
+        # import/reload of setup_db MUST happen inside this patch context so
+        # that re-executing that import statement binds setup_db.AsyncIOMotorClient
+        # to the fake class below instead of the real one — if the
+        # import/reload were moved outside the `with` block, setup_db.main()
+        # would construct a real AsyncIOMotorClient and this test would stop
+        # being isolated from MongoDB.
         with patch(
             "motor.motor_asyncio.AsyncIOMotorClient",
             return_value=_FakeClient(calls),

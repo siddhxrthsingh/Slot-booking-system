@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
@@ -26,11 +26,12 @@ async def get_slots(
     campus: Literal["RR", "EC"] | None = Query(default=None),
     sport: str | None = Query(default=None),
     include_inactive: bool = Query(default=False),
+    date: date_type | None = Query(default=None),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
     slots = await admin_service.list_all_slots(
-        db, campus, sport, active_only=not include_inactive
+        db, campus, sport, active_only=not include_inactive, date=date
     )
     result = []
     for s in slots:

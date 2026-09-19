@@ -1,13 +1,13 @@
 """
 Admin service: slot management, booking approvals, metrics.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, time, timedelta, timezone
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.services.booking_service import _slot_end_dt, _slot_start_dt, cancel_booking
+from app.services.booking_service import _slot_end_dt, _slot_start_dt, cancel_booking, ensure_slots_generated
 from app.utils import ensure_utc
 
 
@@ -29,7 +29,20 @@ async def list_all_slots(
     campus: str | None = None,
     sport: str | None = None,
     active_only: bool = True,
+    date: date_type | None = None,
 ) -> list[dict]:
+    # `date` mirrors the student-facing list_available_slots contract exactly
+    # (a plain "YYYY-MM-DD" calendar date, normalized to the same UTC-midnight
+    # bucket convention used by the slot generator) so the admin Slots page
+    # can request generation for a specific date rather than silently
+    # inventing one. When given, slots are ensured to exist for that
+    # campus/date BEFORE querying — reusing generate_slots_for_date via the
+    # shared ensure_slots_generated helper — so admin no longer depends on a
+    # student having opened the dashboard first for that date.
+    slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
+    if slot_date:
+        await ensure_slots_generated(db, slot_date, campus=campus or "RR")
+
     query: dict = {}
     if active_only:
         query["status"] = {"$in": ["open", "full"]}
@@ -37,6 +50,10 @@ async def list_all_slots(
         query["campus"] = campus
     if sport:
         query["sport"] = {"$regex": sport, "$options": "i"}
+    if slot_date:
+        start = slot_date
+        end = slot_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        query["date"] = {"$gte": start, "$lte": end}
 
     slots = await db["slots"].find(query).sort("date", 1).to_list(length=500)
     if active_only:

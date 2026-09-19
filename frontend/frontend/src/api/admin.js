@@ -1,9 +1,10 @@
 import client from './client';
 
-export async function getAdminSlots({ campus, sport } = {}) {
+export async function getAdminSlots({ campus, sport, date } = {}) {
   const params = {};
   if (campus) params.campus = campus;
   if (sport) params.sport = sport;
+  if (date) params.date = date;
   const { data } = await client.get('/admin/slots', { params });
   return data.data;
 }

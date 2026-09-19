@@ -12,7 +12,7 @@ async def main():
     client = AsyncIOMotorClient(settings.mongo_uri)
     db = client[settings.mongo_db_name]
 
-    print(f"Connected to: {settings.mongo_uri} / {settings.mongo_db_name}")
+    print(f"Connected to MongoDB database: {settings.mongo_db_name}")
 
     # Users
     await db["users"].create_index("srn", unique=True)

@@ -16,12 +16,13 @@ class FakeCursor:
     def __init__(self, docs):
         self.docs = list(docs)
 
-    def sort(self, sort_spec):
+    def sort(self, sort_spec, direction=None):
         if isinstance(sort_spec, str):
-            self.docs.sort(key=lambda doc: doc.get(sort_spec))
+            # pymongo-style .sort("field", direction) two-arg form.
+            self.docs.sort(key=lambda doc: doc.get(sort_spec) or "", reverse=(direction or 1) < 0)
             return self
-        for key, direction in reversed(sort_spec):
-            self.docs.sort(key=lambda doc: doc.get(key) or "", reverse=direction < 0)
+        for key, dir_ in reversed(sort_spec):
+            self.docs.sort(key=lambda doc: doc.get(key) or "", reverse=dir_ < 0)
         return self
 
     async def to_list(self, length):

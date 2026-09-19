@@ -261,20 +261,28 @@ export default function Dashboard() {
       const params = {};
       if (adminFilterCampus) params.campus = adminFilterCampus;
       if (adminFilterSport)  params.sport  = adminFilterSport;
-      const [m, pb, ab, bans, slots, facilityList, templates] = await Promise.all([
+      // Same rolling 3-day window (today/tomorrow/day-after-tomorrow, IST) as
+      // the student dashboard's fetchSlots, requested explicitly per date so
+      // the admin Slots page ensures/generates slots for each date itself —
+      // it must never depend on a student having opened the dashboard first.
+      const [m, pb, ab, bans, todaySlots, tomorrowSlots, dayAfterSlots, facilityList, templates] = await Promise.all([
         getMetrics(),
         getPendingBookings(),
         getAllBookings(),
         getActiveBans(),
-        getAdminSlots(params),
+        getAdminSlots({ ...params, date: istDateKey(0) }),
+        getAdminSlots({ ...params, date: istDateKey(1) }),
+        getAdminSlots({ ...params, date: istDateKey(2) }),
         getFacilities(),
         getScheduleTemplates(),
       ]);
+      const adminSlotsById = new Map();
+      [...todaySlots, ...tomorrowSlots, ...dayAfterSlots].forEach((s) => adminSlotsById.set(s.id, s));
       setMetrics(m);
       setPendingBookings(pb);
       setAllBookings(ab);
       setActiveBans(bans);
-      setAdminSlots(slots);
+      setAdminSlots([...adminSlotsById.values()]);
       setFacilities(facilityList);
       setScheduleTemplates(templates);
     } catch {

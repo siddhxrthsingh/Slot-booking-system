@@ -159,6 +159,38 @@ def serialize_student_slot(slot: dict) -> dict:
     }
 
 
+async def ensure_slots_generated(
+    db: AsyncIOMotorDatabase,
+    slot_date: datetime,
+    campus: str = "RR",
+) -> None:
+    """Idempotently make sure generated slots exist for a given campus/date.
+
+    `slot_date` must already be normalized to the UTC-midnight calendar-day
+    bucket convention used by the slot generator
+    (slot_generation_service.normalize_slot_date). Shared by both the
+    student-facing lazy-generation trigger (list_available_slots) and the
+    admin slot listing, so the admin Slots page never depends on a student
+    having opened the dashboard first.
+
+    Slot generation is idempotent (upsert with $setOnInsert), but running it
+    on every request re-scans all facilities/templates for no reason. Skip
+    the generation pass once generated slots already exist for this
+    campus/date; if none exist yet (or a race means none did a moment ago),
+    generation runs and safely no-ops on any doc created meanwhile.
+    """
+    already_generated = await db["slots"].find_one(
+        {
+            "campus": campus,
+            "date": slot_date,
+            "slot_type": "generated",
+        },
+        {"_id": 1},
+    )
+    if already_generated is None:
+        await generate_slots_for_date(db, slot_date, campus=campus)
+
+
 async def list_available_slots(
     db: AsyncIOMotorDatabase,
     sport: str | None = None,
@@ -174,21 +206,7 @@ async def list_available_slots(
     slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
 
     if slot_date:
-        # Slot generation is idempotent (upsert with $setOnInsert), but running
-        # it on every request re-scans all facilities/templates for no reason.
-        # Skip the generation pass once generated slots already exist for this
-        # campus/date; if none exist yet (or a race means none did a moment
-        # ago), generation runs and safely no-ops on any doc created meanwhile.
-        already_generated = await db["slots"].find_one(
-            {
-                "campus": campus or "RR",
-                "date": slot_date,
-                "slot_type": "generated",
-            },
-            {"_id": 1},
-        )
-        if already_generated is None:
-            await generate_slots_for_date(db, slot_date, campus=campus or "RR")
+        await ensure_slots_generated(db, slot_date, campus=campus or "RR")
 
     query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
