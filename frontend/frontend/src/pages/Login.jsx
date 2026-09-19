@@ -23,7 +23,7 @@ export default function Login() {
     setLoading(true);
     try {
       const profile = await login(username.trim(), password);
-      navigate(profile.role === 'admin' ? '/?portal=admin' : '/');
+      navigate(profile.role === 'admin' ? '/admin' : '/');
     } catch (err) {
       const status = err.response?.status;
       if (status === 401) {

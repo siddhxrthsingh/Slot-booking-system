@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useOccupancySocket } from '../hooks/useOccupancySocket';
@@ -116,11 +116,16 @@ const BLANK_TEMPLATE = {
 export default function Dashboard() {
   const { user, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const location = useLocation();
 
-  const [activePortal, setActivePortal] = useState(
-    searchParams.get('portal') === 'admin' && isAdmin ? 'admin' : 'student'
-  );
+  // Portal is derived entirely from the route (ProtectedRoute already
+  // guarantees /admin is admin-only), not from a one-time state initializer
+  // or a ?portal= query param.
+  const activePortal = location.pathname.startsWith('/admin') && isAdmin ? 'admin' : 'student';
+
+  // An authenticated admin must never accidentally land on the student
+  // dashboard — always send them to the Admin Console.
+  const shouldRedirectToAdmin = isAdmin && location.pathname === '/';
 
   // ── Student state ─────────────────────────────────────────────────────────
   const [slots,            setSlots]            = useState([]);
@@ -815,6 +820,10 @@ export default function Dashboard() {
     : Array(6).fill(null).map((_, i) => ({ label: ['Active slots','Occupancy','Total bookings','Confirmed','Students','Active bans'][i], value: '—' }));
 
   const isStudent = activePortal === 'student';
+
+  if (shouldRedirectToAdmin) {
+    return <Navigate to="/admin" replace />;
+  }
 
   async function handleLogout() {
     await logout();

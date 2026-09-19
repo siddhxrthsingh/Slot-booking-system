@@ -22,11 +22,17 @@ class Settings(BaseSettings):
 
     rate_limit_login: str = "10/minute"
 
-    # Admin credentials (employee-ID based, no external API)
-    admin_employee_id: str = "EMP001"
+    # Admin credentials (employee-ID based, no external API).
+    # Comma-separated list of employee IDs, all authenticating with the same
+    # admin_password — mirrors the frontend_origin comma-separated pattern.
+    admin_employee_ids: str = "EMP001"
     admin_password: str = "admin123"
     admin_name: str = "Sports Admin"
     admin_email: str = "admin@pesu.edu"
+
+    @property
+    def admin_employee_id_set(self) -> set[str]:
+        return {e.strip().upper() for e in self.admin_employee_ids.split(",") if e.strip()}
 
     # Email notifications (optional — leave blank to disable)
     smtp_host: str = ""

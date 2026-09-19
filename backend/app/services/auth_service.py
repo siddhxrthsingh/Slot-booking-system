@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def is_admin_employee_id(username: str) -> bool:
-    """True when the username matches the configured admin employee ID."""
-    return username.upper() == settings.admin_employee_id.upper()
+    """True when the username matches one of the configured admin employee IDs."""
+    return username.upper() in settings.admin_employee_id_set
 
 
 async def verify_admin_credentials(username: str, password: str) -> dict | None:
@@ -36,7 +36,7 @@ async def verify_admin_credentials(username: str, password: str) -> dict | None:
     if password != settings.admin_password:
         return None
     return {
-        "employee_id": settings.admin_employee_id.upper(),
+        "employee_id": username.upper(),
         "name":        settings.admin_name,
         "email":       settings.admin_email,
         "role":        "admin",
