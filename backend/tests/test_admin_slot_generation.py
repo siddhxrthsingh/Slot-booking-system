@@ -40,7 +40,8 @@ class AdminSlotGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         generated = [s for s in db["slots"].docs if s.get("slot_type") == "generated"]
         self.assertEqual(len(generated), 2)
-        self.assertEqual({s["start_time"] for s in result}, {"09:00", "10:00"})
+        self.assertEqual({s["start_time"] for s in result["items"]}, {"09:00", "10:00"})
+        self.assertEqual(result["total"], 2)
 
     # B. Student never opened the dashboard; admin still gets slots. Same
     # assertion as A — list_all_slots is the only entrypoint exercised.
@@ -50,7 +51,7 @@ class AdminSlotGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await list_all_slots(db, campus="RR", date=weekday_date.date())
 
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result["items"]), 2)
 
     # C/D/E: today / tomorrow / day-after-tomorrow requests each generate and
     # return only that date's slots.
@@ -64,10 +65,10 @@ class AdminSlotGenerationTests(unittest.IsolatedAsyncioTestCase):
         result0 = await list_all_slots(db, campus="RR", date=d0.date())
         result1 = await list_all_slots(db, campus="RR", date=d1.date())
 
-        self.assertTrue(all(s["date"] == d0 for s in result0))
-        self.assertTrue(all(s["date"] == d1 for s in result1))
-        self.assertEqual(len(result0), 2)
-        self.assertEqual(len(result1), 2)
+        self.assertTrue(all(s["date"] == d0 for s in result0["items"]))
+        self.assertTrue(all(s["date"] == d1 for s in result1["items"]))
+        self.assertEqual(len(result0["items"]), 2)
+        self.assertEqual(len(result1["items"]), 2)
 
     # F. Repeated admin requests create no duplicate slots.
     async def test_repeated_admin_requests_do_not_duplicate_slots(self):
@@ -128,7 +129,8 @@ class AdminSlotGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await list_all_slots(db, campus="RR")
 
-        self.assertEqual(result, [])
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total"], 0)
         self.assertEqual(db["slots"].docs, [])
 
 

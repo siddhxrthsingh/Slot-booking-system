@@ -21,6 +21,31 @@ def _filter_active_slots(slots: list[dict], now: datetime | None = None) -> list
 
 
 # ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
+def _paginate(items: list[dict], page: int, page_size: int) -> dict:
+    """Slice an already-filtered, deterministically-sorted list into a page.
+
+    `total` always reflects the full filtered set (not the page slice), so
+    list and metrics counts never diverge for the same filter.
+    """
+    page = max(page, 1)
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    start = (page - 1) * page_size
+    return {
+        "items": items[start:start + page_size],
+        "total": len(items),
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Slot management
 # ---------------------------------------------------------------------------
 
@@ -30,7 +55,9 @@ async def list_all_slots(
     sport: str | None = None,
     active_only: bool = True,
     date: date_type | None = None,
-) -> list[dict]:
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
     # `date` mirrors the student-facing list_available_slots contract exactly
     # (a plain "YYYY-MM-DD" calendar date, normalized to the same UTC-midnight
     # bucket convention used by the slot generator) so the admin Slots page
@@ -55,10 +82,15 @@ async def list_all_slots(
         end = slot_date.replace(hour=23, minute=59, second=59, microsecond=999999)
         query["date"] = {"$gte": start, "$lte": end}
 
-    slots = await db["slots"].find(query).sort("date", 1).to_list(length=500)
+    # Fetch every matching document (not capped at an arbitrary length) so
+    # that pagination and the true total are always computed from the exact
+    # same filtered set — active_only additionally filters by wall-clock end
+    # time, which cannot be expressed as a Mongo query, so it must be applied
+    # in Python before total/pagination are derived.
+    slots = await db["slots"].find(query).sort([("date", 1), ("_id", 1)]).to_list(length=None)
     if active_only:
         slots = _filter_active_slots(slots)
-    return slots
+    return _paginate(slots, page, page_size)
 
 
 async def create_slot(db: AsyncIOMotorDatabase, slot_data: dict, admin_id: str) -> dict:
@@ -315,7 +347,7 @@ async def list_pending_bookings(db: AsyncIOMotorDatabase) -> list[dict]:
                 "slot_id": str(b["slot_id"]),
                 "sport": b["sport"],
                 "status": b["status"],
-                "booking_date": b["booking_date"],
+                "booking_date": ensure_utc(b.get("booking_date")),
                 "notes": b.get("notes"),
                 "user": {
                     "id": str(user["_id"]),
@@ -326,7 +358,7 @@ async def list_pending_bookings(db: AsyncIOMotorDatabase) -> list[dict]:
                 if user
                 else None,
                 "slot": {
-                    "date": slot.get("date"),
+                    "date": ensure_utc(slot.get("date")),
                     "start_time": slot.get("start_time"),
                     "end_time": slot.get("end_time"),
                     "venue": slot.get("venue"),
@@ -384,7 +416,7 @@ async def get_metrics(db: AsyncIOMotorDatabase) -> dict:
     open_full_slots = (
         await db["slots"]
         .find({"status": {"$in": ["open", "full"]}})
-        .to_list(length=500)
+        .to_list(length=None)
     )
     active_slots = _filter_active_slots(open_full_slots)
     open_slots = sum(1 for s in active_slots if s["status"] == "open")
@@ -424,13 +456,27 @@ async def get_metrics(db: AsyncIOMotorDatabase) -> dict:
 async def list_all_bookings(
     db: AsyncIOMotorDatabase,
     status_filter: str | None = None,
-) -> list[dict]:
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> dict:
     query: dict = {}
     if status_filter:
         query["status"] = status_filter
 
+    # count_documents and the page fetch below use the identical `query`, so
+    # the total can never diverge from what the returned page was drawn from.
+    total = await db["bookings"].count_documents(query)
+    page = max(page, 1)
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    skip = (page - 1) * page_size
+
     bookings = (
-        await db["bookings"].find(query).sort("created_at", -1).to_list(length=500)
+        await db["bookings"]
+        .find(query)
+        .sort([("created_at", -1), ("_id", 1)])
+        .skip(skip)
+        .limit(page_size)
+        .to_list(length=page_size)
     )
     enriched = []
     for b in bookings:
@@ -442,7 +488,7 @@ async def list_all_bookings(
                 "slot_id": str(b["slot_id"]),
                 "sport": b["sport"],
                 "status": b["status"],
-                "booking_date": b["booking_date"],
+                "booking_date": ensure_utc(b.get("booking_date")),
                 "cancelled_at": ensure_utc(b.get("cancelled_at")),
                 "notes": b.get("notes"),
                 "created_at": ensure_utc(b["created_at"]),
@@ -455,7 +501,7 @@ async def list_all_bookings(
                 if user
                 else None,
                 "slot": {
-                    "date": slot.get("date"),
+                    "date": ensure_utc(slot.get("date")),
                     "start_time": slot.get("start_time"),
                     "end_time": slot.get("end_time"),
                     "venue": slot.get("venue"),
@@ -465,7 +511,7 @@ async def list_all_bookings(
                 else None,
             }
         )
-    return enriched
+    return {"items": enriched, "total": total, "page": page, "page_size": page_size}
 
 
 # ---------------------------------------------------------------------------

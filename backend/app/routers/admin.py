@@ -11,7 +11,7 @@ from app.schemas.booking import ApprovalAction
 from app.schemas.schedule_template import ScheduleTemplateCreate, ScheduleTemplateUpdate
 from app.schemas.slot import SlotCreate
 from app.services import admin_service, booking_service
-from app.utils import success_response
+from app.utils import ensure_utc, success_response
 from app.ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -27,20 +27,23 @@ async def get_slots(
     sport: str | None = Query(default=None),
     include_inactive: bool = Query(default=False),
     date: date_type | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    slots = await admin_service.list_all_slots(
-        db, campus, sport, active_only=not include_inactive, date=date
+    paged = await admin_service.list_all_slots(
+        db, campus, sport, active_only=not include_inactive, date=date,
+        page=page, page_size=page_size,
     )
     result = []
-    for s in slots:
+    for s in paged["items"]:
         capacity = s.get("capacity", 0)
         booked_count = s.get("booked_count", 0)
         result.append({
             "id":                str(s["_id"]),
             "sport":             s.get("sport"),
-            "date":              s.get("date"),
+            "date":              ensure_utc(s.get("date")),
             "start_time":        s.get("start_time"),
             "end_time":          s.get("end_time"),
             "venue":             s.get("venue") or s.get("facility_name"),
@@ -50,11 +53,19 @@ async def get_slots(
             "available_count":   max(capacity - booked_count, 0),
             "status":            s.get("status"),
             "requires_approval": s.get("requires_approval", False),
-            "created_at":        s.get("created_at"),
+            "created_at":        ensure_utc(s.get("created_at")),
             "is_manual":         s.get("is_manual", False),
             "facility_id":       str(s["facility_id"]) if s.get("facility_id") else None,
         })
-    return success_response(data=result, message="Slots fetched")
+    return success_response(
+        data={
+            "items": result,
+            "total": paged["total"],
+            "page": paged["page"],
+            "page_size": paged["page_size"],
+        },
+        message="Slots fetched",
+    )
 
 
 @router.post("/slots/create")
@@ -172,10 +183,14 @@ async def delete_slot_permanently(
 @router.get("/bookings")
 async def get_all_bookings(
     status_filter: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    bookings = await admin_service.list_all_bookings(db, status_filter)
+    bookings = await admin_service.list_all_bookings(
+        db, status_filter, page=page, page_size=page_size
+    )
     return success_response(data=bookings, message="Bookings fetched")
 
 

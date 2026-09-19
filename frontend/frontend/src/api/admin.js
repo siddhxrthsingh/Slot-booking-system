@@ -1,7 +1,10 @@
 import client from './client';
 
-export async function getAdminSlots({ campus, sport, date } = {}) {
-  const params = {};
+// Returns { items, total, page, page_size }. page_size defaults to the
+// backend's bounded max (200) so existing callers that just want "all slots
+// for this date" keep working without paging through results themselves.
+export async function getAdminSlots({ campus, sport, date, page = 1, page_size = 200 } = {}) {
+  const params = { page, page_size };
   if (campus) params.campus = campus;
   if (sport) params.sport = sport;
   if (date) params.date = date;
@@ -34,8 +37,9 @@ export async function getPendingBookings() {
   return data.data;
 }
 
-export async function getAllBookings(status = null) {
-  const params = {};
+// Returns { items, total, page, page_size }.
+export async function getAllBookings(status = null, { page = 1, page_size = 200 } = {}) {
+  const params = { page, page_size };
   if (status) params.status = status;
   const { data } = await client.get('/admin/bookings', { params });
   return data.data;

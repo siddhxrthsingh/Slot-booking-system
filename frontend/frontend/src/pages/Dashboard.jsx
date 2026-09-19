@@ -282,10 +282,10 @@ export default function Dashboard() {
         getScheduleTemplates(),
       ]);
       const adminSlotsById = new Map();
-      [...todaySlots, ...tomorrowSlots, ...dayAfterSlots].forEach((s) => adminSlotsById.set(s.id, s));
+      [...todaySlots.items, ...tomorrowSlots.items, ...dayAfterSlots.items].forEach((s) => adminSlotsById.set(s.id, s));
       setMetrics(m);
       setPendingBookings(pb);
-      setAllBookings(ab);
+      setAllBookings(ab.items);
       setActiveBans(bans);
       setAdminSlots([...adminSlotsById.values()]);
       setFacilities(facilityList);
