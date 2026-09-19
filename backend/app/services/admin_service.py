@@ -67,8 +67,9 @@ async def list_all_slots(
     # shared ensure_slots_generated helper — so admin no longer depends on a
     # student having opened the dashboard first for that date.
     slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
+    generation_diagnostics = None
     if slot_date:
-        await ensure_slots_generated(db, slot_date, campus=campus or "RR")
+        generation_diagnostics = await ensure_slots_generated(db, slot_date, campus=campus or "RR")
 
     query: dict = {}
     if active_only:
@@ -90,7 +91,31 @@ async def list_all_slots(
     slots = await db["slots"].find(query).sort([("date", 1), ("_id", 1)]).to_list(length=None)
     if active_only:
         slots = _filter_active_slots(slots)
-    return _paginate(slots, page, page_size)
+    paged = _paginate(slots, page, page_size)
+    paged["generation_diagnostics"] = _summarize_generation_diagnostics(generation_diagnostics)
+    return paged
+
+
+def _summarize_generation_diagnostics(summary: dict | None) -> dict | None:
+    """Reduce a raw generate_slots_for_date() summary to an admin-safe shape.
+
+    Only surfaced when this request actually triggered generation (summary
+    is None otherwise - see ensure_slots_generated). Drops nothing sensitive
+    (facility ids/names and error reasons only); this is admin-only output,
+    never returned to student-facing endpoints.
+    """
+    if summary is None:
+        return None
+    failed = [e for e in summary.get("errors", []) if e.get("reason") != "no_applicable_template"]
+    return {
+        "facilities_processed": summary.get("facilities_processed", 0),
+        "slots_created": summary.get("slots_created", 0),
+        "slots_existing": summary.get("slots_existing", 0),
+        "slots_skipped": summary.get("slots_skipped", 0),
+        "errors": summary.get("errors", []),
+        "has_failures": len(failed) > 0,
+        "manual_overlaps": summary.get("manual_overlaps", []),
+    }
 
 
 async def create_slot(db: AsyncIOMotorDatabase, slot_data: dict, admin_id: str) -> dict:

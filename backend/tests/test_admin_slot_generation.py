@@ -132,6 +132,59 @@ class AdminSlotGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"], [])
         self.assertEqual(result["total"], 0)
         self.assertEqual(db["slots"].docs, [])
+        self.assertIsNone(result["generation_diagnostics"])
+
+    # RC-4: the request that actually triggers generation must surface
+    # diagnostics identifying facilities that could not be generated.
+    async def test_generation_diagnostics_reported_when_template_missing(self):
+        weekday_date = future_weekday()
+        facilities = [
+            {
+                "_id": "badminton-1", "campus": "RR", "sport": "Badminton",
+                "name": "Court 1", "display_name": "Badminton Court 1",
+                "capacity": 6, "is_active": True, "sort_order": 1,
+            },
+            {
+                "_id": "basketball-1", "campus": "RR", "sport": "Basketball",
+                "name": "Court 1", "display_name": "Basketball Court 1",
+                "capacity": 12, "is_active": True, "sort_order": 1,
+            },
+        ]
+        templates = [
+            {
+                "campus": "RR", "sport": "Badminton", "facility_scope": "sport",
+                "day_type": "weekday",
+                "periods": [_student_period("09:00", "10:00")],
+                "is_active": True, "priority": 10, "updated_at": datetime(2026, 1, 1),
+            },
+        ]
+        db = FakeDb([], facilities=facilities, templates=templates)
+
+        result = await list_all_slots(db, campus="RR", date=weekday_date.date())
+
+        diagnostics = result["generation_diagnostics"]
+        self.assertIsNotNone(diagnostics)
+        self.assertEqual(diagnostics["facilities_processed"], 2)
+        self.assertTrue(any(
+            e["facility_id"] == "basketball-1" and e["reason"] == "no_applicable_template"
+            for e in diagnostics["errors"]
+        ))
+        # A missing-template facility alone is an expected/no-op case, not a
+        # "failure" admins need to act on.
+        self.assertFalse(diagnostics["has_failures"])
+        # Badminton still generated normally despite basketball's failure.
+        self.assertEqual(len(result["items"]), 1)
+
+    # A repeated request for the same date skips regeneration, so no fresh
+    # diagnostics are computed - this is a known/accepted RC-4 limitation.
+    async def test_generation_diagnostics_absent_on_repeated_request(self):
+        weekday_date = future_weekday()
+        db = self._weekday_db()
+
+        await list_all_slots(db, campus="RR", date=weekday_date.date())
+        second = await list_all_slots(db, campus="RR", date=weekday_date.date())
+
+        self.assertIsNone(second["generation_diagnostics"])
 
 
 if __name__ == "__main__":

@@ -63,6 +63,7 @@ async def get_slots(
             "total": paged["total"],
             "page": paged["page"],
             "page_size": paged["page_size"],
+            "generation_diagnostics": paged.get("generation_diagnostics"),
         },
         message="Slots fetched",
     )

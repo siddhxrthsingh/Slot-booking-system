@@ -408,6 +408,36 @@ class SlotGenerationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(slots_for(db, "basketball-1")), 0)
         self.assertTrue(any(error["reason"] == "invalid_student_period_duration" for error in result["errors"]))
 
+    async def test_malformed_period_is_recorded_and_does_not_abort_other_facilities(self):
+        """RC-4: a period missing start_time/end_time previously raised an
+        unhandled KeyError inside the facility loop, aborting generation for
+        every facility processed after the bad one. It must now be recorded
+        as a generation_error and every other facility must still generate."""
+        db = default_db()
+        db["schedule_templates"].docs.append({
+            "campus": "RR",
+            "sport": "Basketball",
+            "facility_scope": "facility",
+            "facility_id": "basketball-1",
+            "day_type": "weekday",
+            "periods": [{
+                "period_type": "student",
+                "is_bookable": True,
+                # start_time/end_time deliberately missing/malformed.
+            }],
+            "is_active": True,
+            "priority": 100,
+            "updated_at": datetime(2026, 1, 2),
+        })
+        result = await generate_slots_for_date(db, datetime(2026, 8, 17))
+
+        self.assertEqual(len(slots_for(db, "basketball-1")), 0)
+        self.assertTrue(any(error["reason"] == "generation_error" for error in result["errors"]))
+        # Other facilities processed in the same run still generated.
+        self.assertEqual(len(slots_for(db, "badminton-1")), 6)
+        self.assertEqual(len(slots_for(db, "badminton-2")), 11)
+        self.assertEqual(result["facilities_processed"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

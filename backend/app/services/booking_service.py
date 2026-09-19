@@ -163,7 +163,7 @@ async def ensure_slots_generated(
     db: AsyncIOMotorDatabase,
     slot_date: datetime,
     campus: str = "RR",
-) -> None:
+) -> dict | None:
     """Idempotently make sure generated slots exist for a given campus/date.
 
     `slot_date` must already be normalized to the UTC-midnight calendar-day
@@ -178,6 +178,14 @@ async def ensure_slots_generated(
     the generation pass once generated slots already exist for this
     campus/date; if none exist yet (or a race means none did a moment ago),
     generation runs and safely no-ops on any doc created meanwhile.
+
+    Returns the generation summary (facilities_processed/errors/etc. from
+    generate_slots_for_date) when generation actually ran this call, or None
+    when it was skipped because slots already exist for this campus/date.
+    Callers that need generation failures to be diagnosable (e.g. the admin
+    slot listing) should surface a non-None result; student-facing callers
+    should not expose it (return value is intentionally raw/internal - it
+    may contain exception type names and must never reach student responses).
     """
     already_generated = await db["slots"].find_one(
         {
@@ -188,7 +196,8 @@ async def ensure_slots_generated(
         {"_id": 1},
     )
     if already_generated is None:
-        await generate_slots_for_date(db, slot_date, campus=campus)
+        return await generate_slots_for_date(db, slot_date, campus=campus)
+    return None
 
 
 async def list_available_slots(

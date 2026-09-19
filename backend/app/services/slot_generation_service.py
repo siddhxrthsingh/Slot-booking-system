@@ -164,77 +164,104 @@ async def generate_slots_for_date(
 
     for facility in facilities:
         summary["facilities_processed"] += 1
-        template = await resolve_template_for_facility(db, facility, slot_date, day_type)
-        if not template:
-            summary["slots_skipped"] += 1
-            summary["errors"].append({
-                "facility_id": str(facility["_id"]),
-                "facility_name": facility.get("display_name") or facility.get("name"),
-                "reason": "no_applicable_template",
-            })
-            continue
+        facility_id = str(facility["_id"])
+        facility_name = facility.get("display_name") or facility.get("name")
 
-        for period in template.get("periods", []):
-            if period.get("period_type") != "student" or not period.get("is_bookable", False):
-                continue
-
-            duration_minutes = _period_duration_minutes(period)
-            if duration_minutes != 60 or period.get("duration_minutes") != 60:
+        try:
+            template = await resolve_template_for_facility(db, facility, slot_date, day_type)
+            if not template:
                 summary["slots_skipped"] += 1
                 summary["errors"].append({
-                    "facility_id": str(facility["_id"]),
-                    "facility_name": facility.get("display_name") or facility.get("name"),
-                    "start_time": period.get("start_time"),
-                    "end_time": period.get("end_time"),
-                    "reason": "invalid_student_period_duration",
+                    "facility_id": facility_id,
+                    "facility_name": facility_name,
+                    "reason": "no_applicable_template",
                 })
                 continue
 
-            overlaps = await _find_manual_overlaps(
-                db,
-                facility,
-                slot_date,
-                period["start_time"],
-                period["end_time"],
-            )
-            summary["manual_overlaps"].extend(overlaps)
+            for period in template.get("periods", []):
+                if period.get("period_type") != "student" or not period.get("is_bookable", False):
+                    continue
 
-            identity = {
-                "campus": facility["campus"],
-                "facility_id": facility["_id"],
-                "date": slot_date,
-                "start_time": period["start_time"],
-                "end_time": period["end_time"],
-                "slot_type": "generated",
-            }
-            facility_name = facility.get("display_name") or facility.get("name")
-            slot_doc = {
-                **identity,
+                try:
+                    duration_minutes = _period_duration_minutes(period)
+                    if duration_minutes != 60 or period.get("duration_minutes") != 60:
+                        summary["slots_skipped"] += 1
+                        summary["errors"].append({
+                            "facility_id": facility_id,
+                            "facility_name": facility_name,
+                            "start_time": period.get("start_time"),
+                            "end_time": period.get("end_time"),
+                            "reason": "invalid_student_period_duration",
+                        })
+                        continue
+
+                    overlaps = await _find_manual_overlaps(
+                        db,
+                        facility,
+                        slot_date,
+                        period["start_time"],
+                        period["end_time"],
+                    )
+                    summary["manual_overlaps"].extend(overlaps)
+
+                    identity = {
+                        "campus": facility["campus"],
+                        "facility_id": facility["_id"],
+                        "date": slot_date,
+                        "start_time": period["start_time"],
+                        "end_time": period["end_time"],
+                        "slot_type": "generated",
+                    }
+                    slot_doc = {
+                        **identity,
+                        "facility_name": facility_name,
+                        "sport": facility["sport"],
+                        "venue": facility_name,
+                        "capacity": facility["capacity"],
+                        "booked_count": 0,
+                        "status": "open",
+                        "duration_minutes": 60,
+                        "requires_approval": False,
+                        "leader_user_id": None,
+                        "created_by": None,
+                        "override_reason": None,
+                        "notes": None,
+                        "is_manual": False,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+
+                    result = await db["slots"].update_one(
+                        identity,
+                        {"$setOnInsert": slot_doc},
+                        upsert=True,
+                    )
+                    if result.upserted_id is not None:
+                        summary["slots_created"] += 1
+                    else:
+                        summary["slots_existing"] += 1
+                except Exception as exc:
+                    # A malformed period (e.g. missing/invalid start_time or
+                    # end_time) must not abort generation for the rest of
+                    # this facility's periods or any other facility.
+                    summary["slots_skipped"] += 1
+                    summary["errors"].append({
+                        "facility_id": facility_id,
+                        "facility_name": facility_name,
+                        "start_time": period.get("start_time"),
+                        "end_time": period.get("end_time"),
+                        "reason": "generation_error",
+                        "error_type": type(exc).__name__,
+                    })
+        except Exception as exc:
+            # An unexpected failure resolving/processing this facility's
+            # template must not prevent other facilities from generating.
+            summary["slots_skipped"] += 1
+            summary["errors"].append({
+                "facility_id": facility_id,
                 "facility_name": facility_name,
-                "sport": facility["sport"],
-                "venue": facility_name,
-                "capacity": facility["capacity"],
-                "booked_count": 0,
-                "status": "open",
-                "duration_minutes": 60,
-                "requires_approval": False,
-                "leader_user_id": None,
-                "created_by": None,
-                "override_reason": None,
-                "notes": None,
-                "is_manual": False,
-                "created_at": now,
-                "updated_at": now,
-            }
-
-            result = await db["slots"].update_one(
-                identity,
-                {"$setOnInsert": slot_doc},
-                upsert=True,
-            )
-            if result.upserted_id is not None:
-                summary["slots_created"] += 1
-            else:
-                summary["slots_existing"] += 1
+                "reason": "generation_error",
+                "error_type": type(exc).__name__,
+            })
 
     return summary
