@@ -85,6 +85,14 @@ async def main():
     await db["sessions"].create_index("expires_at", expireAfterSeconds=0)
     print("  ✓ sessions indexes (TTL on expires_at)")
 
+    # Bans
+    # check_user_ban() (hit on every join attempt) filters on
+    # {user_id, banned_until: {$gt: now}}; apply_ban()'s upsert and
+    # unban_user()'s delete both filter on {user_id} alone. A single
+    # compound index serves all three — bans had no index at all before.
+    await db["bans"].create_index([("user_id", 1), ("banned_until", 1)])
+    print("  ✓ bans indexes")
+
     client.close()
     print("\nAll indexes created successfully!")
 

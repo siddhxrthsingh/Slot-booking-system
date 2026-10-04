@@ -99,6 +99,18 @@ class SetupDbIndexTests(unittest.TestCase):
         partial = kwargs.get("partialFilterExpression", {})
         self.assertEqual(partial.get("slot_type"), "generated")
 
+    def test_bans_user_id_banned_until_index_exists(self):
+        # bans had no index at all before — check_user_ban() (hit on every
+        # join attempt) filters on {user_id, banned_until: {$gt: now}}, and
+        # apply_ban()'s upsert / unban_user()'s delete both filter on
+        # {user_id} alone, which this compound index also serves as a prefix.
+        calls = self._run_main_and_collect_calls()
+        bans_calls = [
+            c for c in calls
+            if c[0] == "bans" and c[1] == [("user_id", 1), ("banned_until", 1)]
+        ]
+        self.assertEqual(len(bans_calls), 1)
+
     def test_main_is_idempotent_when_rerun(self):
         # create_index is idempotent in real MongoDB; verify main() can be
         # invoked twice without raising (no duplicate/conflicting definitions

@@ -298,11 +298,15 @@ export default function Dashboard() {
   }, [adminFilterCampus, adminFilterSport]);
 
   // ── Initial load ──────────────────────────────────────────────────────────
+  // Student-only data: an admin account never renders the student view (see
+  // the isStudent branch below), so fetching these for an admin was 3 dead
+  // requests on every admin mount/reload.
   useEffect(() => {
+    if (isAdmin) return;
     fetchSlots();
     fetchMyBookings();
     fetchBanStatus();
-  }, [fetchSlots, fetchMyBookings, fetchBanStatus]);
+  }, [isAdmin, fetchSlots, fetchMyBookings, fetchBanStatus]);
 
   useEffect(() => {
     if (activePortal === 'admin' && isAdmin) fetchAdminData();

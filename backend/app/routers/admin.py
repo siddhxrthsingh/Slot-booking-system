@@ -298,9 +298,16 @@ async def list_bans(
     """List all active bans."""
     now = datetime.now(timezone.utc)
     bans = await db["bans"].find({"banned_until": {"$gt": now}}).to_list(length=200)
+    user_ids = list({b["user_id"] for b in bans})
+    users_by_id = {}
+    if user_ids:
+        users = await db["users"].find(
+            {"_id": {"$in": user_ids}}, {"password": 0}
+        ).to_list(length=len(user_ids))
+        users_by_id = {u["_id"]: u for u in users}
     result = []
     for b in bans:
-        user = await db["users"].find_one({"_id": b["user_id"]}, {"password": 0})
+        user = users_by_id.get(b["user_id"])
         result.append({
             "id":           str(b["_id"]),
             "user_id":      str(b["user_id"]),

@@ -1,7 +1,7 @@
 from datetime import date as date_type, datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.database import get_db
@@ -29,9 +29,10 @@ async def list_available_slots(
 
 @router.post("/create")
 async def create_booking(
-    body:         BookingCreate,
-    db:           AsyncIOMotorDatabase = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    body:             BookingCreate,
+    background_tasks: BackgroundTasks,
+    db:               AsyncIOMotorDatabase = Depends(get_db),
+    current_user:     dict = Depends(get_current_user),
 ):
     try:
         booking = await booking_service.create_booking(
@@ -62,7 +63,12 @@ async def create_booking(
             "status":          slot["status"],
         })
     if slot and current_user.get("email"):
-        await email_service.send_booking_confirmation(
+        # Fire-and-forget: SMTP latency must never sit on the booking's
+        # critical path. email_service._send() already swallows delivery
+        # errors internally, so a failure here can never affect the
+        # already-confirmed booking.
+        background_tasks.add_task(
+            email_service.send_booking_confirmation,
             to_email   = current_user["email"],
             name       = current_user.get("name", current_user.get("srn", "Student")),
             sport      = booking["sport"],
@@ -114,9 +120,10 @@ async def my_ban_status(
 
 @router.delete("/{booking_id}")
 async def cancel_booking(
-    booking_id:   str,
-    db:           AsyncIOMotorDatabase = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    booking_id:       str,
+    background_tasks: BackgroundTasks,
+    db:               AsyncIOMotorDatabase = Depends(get_db),
+    current_user:     dict = Depends(get_current_user),
 ):
     try:
         updated = await booking_service.cancel_booking(
@@ -151,7 +158,9 @@ async def cancel_booking(
             banned_until_str = ensure_utc(ban["banned_until"]).astimezone(IST).strftime("%d %b %Y, %H:%M IST")
 
     if slot and current_user.get("email"):
-        await email_service.send_booking_cancellation(
+        # Fire-and-forget, same rationale as the confirmation email above.
+        background_tasks.add_task(
+            email_service.send_booking_cancellation,
             to_email   = current_user["email"],
             name       = current_user.get("name", current_user.get("srn", "Student")),
             sport      = updated["sport"],

@@ -39,7 +39,12 @@ class FakeCursor:
 
 def _matches(doc, query):
     for key, expected in query.items():
-        if doc.get(key) != expected:
+        actual = doc.get(key)
+        if isinstance(expected, dict) and "$in" in expected:
+            if actual not in expected["$in"]:
+                return False
+            continue
+        if actual != expected:
             return False
     return True
 

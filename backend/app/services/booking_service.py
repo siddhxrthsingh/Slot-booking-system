@@ -16,6 +16,8 @@ Join policy (Phase 3 Step 1B):
 
 Cancellation/leave behavior is out of scope for this step and remains as before.
 """
+import asyncio
+import logging
 from datetime import date as date_type, datetime, time, timedelta, timezone
 from typing import Literal
 
@@ -30,6 +32,7 @@ from app.services.slot_generation_service import generate_slots_for_date
 from app.utils import IST
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +162,54 @@ def serialize_student_slot(slot: dict) -> dict:
     }
 
 
+# In-flight generation tasks, keyed by (campus, slot_date.isoformat()). Lets
+# concurrent requests for the same campus/date share one generate_slots_for_date()
+# call instead of each kicking off a redundant full facility/template scan
+# (generation itself is already idempotent via $setOnInsert, so this is purely
+# a work-dedup, not a correctness requirement). Scoped to this process's
+# lifetime — lost on a Render restart, which is fine: the next request just
+# regenerates, and upsert semantics mean that can never create duplicates.
+_generation_tasks: dict[tuple[str, str], "asyncio.Task"] = {}
+
+
+def _get_or_start_generation_task(
+    db: AsyncIOMotorDatabase, slot_date: datetime, campus: str
+) -> "asyncio.Task":
+    key = (campus, slot_date.isoformat())
+    task = _generation_tasks.get(key)
+    if task is None or task.done():
+        task = asyncio.create_task(generate_slots_for_date(db, slot_date, campus=campus))
+        _generation_tasks[key] = task
+
+        def _log_if_failed(t: "asyncio.Task") -> None:
+            # Drop the finished task so the registry doesn't grow unbounded
+            # over the process's lifetime (one entry per distinct
+            # campus/date ever requested cold).
+            if _generation_tasks.get(key) is t:
+                _generation_tasks.pop(key, None)
+            # Nothing awaits a background-mode task directly, so an
+            # exception here would otherwise only surface as an "exception
+            # was never retrieved" warning. generate_slots_for_date already
+            # catches per-facility/per-period errors into its own summary,
+            # so this only fires on a genuinely unexpected failure.
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.exception(
+                    "Background slot generation failed for campus=%s date=%s",
+                    campus, slot_date, exc_info=exc,
+                )
+
+        task.add_done_callback(_log_if_failed)
+    return task
+
+
 async def ensure_slots_generated(
     db: AsyncIOMotorDatabase,
     slot_date: datetime,
     campus: str = "RR",
+    background: bool = False,
 ) -> dict | None:
     """Idempotently make sure generated slots exist for a given campus/date.
 
@@ -179,13 +226,27 @@ async def ensure_slots_generated(
     campus/date; if none exist yet (or a race means none did a moment ago),
     generation runs and safely no-ops on any doc created meanwhile.
 
+    `background=False` (the default — used by the admin slot listing) keeps
+    the original behavior exactly: this call awaits generation and returns
+    its summary, so admin's generation diagnostics stay accurate for the
+    request that actually triggered them.
+
+    `background=True` (used by the student-facing lazy-generation trigger)
+    takes expensive generation off the request's critical path: when slots
+    are missing, it starts (or reuses an already in-flight) generation task
+    and returns None immediately without waiting for it, so the student
+    request is never slowed down by generation. The student simply sees
+    today's not-yet-generated slots on this one request and gets them on
+    the next (generation normally completes well within a second, and the
+    frontend refetches often — on every websocket event and booking action).
+
     Returns the generation summary (facilities_processed/errors/etc. from
-    generate_slots_for_date) when generation actually ran this call, or None
-    when it was skipped because slots already exist for this campus/date.
-    Callers that need generation failures to be diagnosable (e.g. the admin
-    slot listing) should surface a non-None result; student-facing callers
-    should not expose it (return value is intentionally raw/internal - it
-    may contain exception type names and must never reach student responses).
+    generate_slots_for_date) when generation ran synchronously this call, or
+    None when it was skipped (slots already exist) or deferred to the
+    background. Callers that need generation failures to be diagnosable
+    (e.g. the admin slot listing) must call with background=False; the
+    return value is intentionally raw/internal and must never reach student
+    responses (it may contain exception type names).
     """
     already_generated = await db["slots"].find_one(
         {
@@ -195,9 +256,27 @@ async def ensure_slots_generated(
         },
         {"_id": 1},
     )
-    if already_generated is None:
-        return await generate_slots_for_date(db, slot_date, campus=campus)
-    return None
+    if already_generated is not None:
+        return None
+
+    task = _get_or_start_generation_task(db, slot_date, campus)
+    if background:
+        return None
+    return await task
+
+
+async def wait_for_background_generation() -> None:
+    """Await every currently in-flight background-triggered generation task.
+
+    Not called by any request path — generation is intentionally fire-and-
+    forget for student requests (see `ensure_slots_generated(background=True)`).
+    This exists so tests (and any future ops tooling) can deterministically
+    wait for a just-triggered background generation to finish instead of
+    racing it.
+    """
+    pending = [t for t in _generation_tasks.values() if not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def list_available_slots(
@@ -215,7 +294,10 @@ async def list_available_slots(
     slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
 
     if slot_date:
-        await ensure_slots_generated(db, slot_date, campus=campus or "RR")
+        # Student-facing path: never block this request on generation — see
+        # ensure_slots_generated's `background` doc for the eventual-
+        # consistency tradeoff this makes.
+        await ensure_slots_generated(db, slot_date, campus=campus or "RR", background=True)
 
     query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
@@ -428,10 +510,20 @@ async def get_user_bookings(
 
     bookings = await db["bookings"].find(query).sort("created_at", -1).to_list(length=200)
 
+    # Batch-load every referenced slot in one $in query instead of a
+    # per-booking find_one (N+1) — same lookup, same semantics.
+    slot_ids = list({b["slot_id"] for b in bookings})
+    slots_by_id: dict = {}
+    if slot_ids:
+        slot_docs = await db["slots"].find(
+            {"_id": {"$in": slot_ids}}
+        ).to_list(length=len(slot_ids))
+        slots_by_id = {s["_id"]: s for s in slot_docs}
+
     now = datetime.now(timezone.utc)
     enriched = []
     for b in bookings:
-        slot = await db["slots"].find_one({"_id": b["slot_id"]})
+        slot = slots_by_id.get(b["slot_id"])
         # A booking is "past" once its slot's end time has elapsed. A booking
         # whose slot no longer exists can't be upcoming, so it's treated as
         # past too — it only ever shows up in history.

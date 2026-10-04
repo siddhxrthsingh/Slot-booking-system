@@ -355,6 +355,35 @@ async def cancel_slot(db: AsyncIOMotorDatabase, slot_id: str, admin_id: str) -> 
 # Booking approvals
 # ---------------------------------------------------------------------------
 
+async def _load_users_and_slots_for(
+    db: AsyncIOMotorDatabase, bookings: list[dict]
+) -> tuple[dict, dict]:
+    """Batch-load the users/slots referenced by a page of bookings.
+
+    Replaces a per-booking find_one(user) + find_one(slot) pair (2N queries
+    for N bookings) with two $in queries, returned as id->doc maps for O(1)
+    lookup while enriching each booking. Response shape/fields are unchanged.
+    """
+    user_ids = list({b["user_id"] for b in bookings})
+    slot_ids = list({b["slot_id"] for b in bookings})
+
+    users_by_id: dict = {}
+    if user_ids:
+        users = await db["users"].find(
+            {"_id": {"$in": user_ids}}, {"password": 0}
+        ).to_list(length=len(user_ids))
+        users_by_id = {u["_id"]: u for u in users}
+
+    slots_by_id: dict = {}
+    if slot_ids:
+        slots = await db["slots"].find(
+            {"_id": {"$in": slot_ids}}
+        ).to_list(length=len(slot_ids))
+        slots_by_id = {s["_id"]: s for s in slots}
+
+    return users_by_id, slots_by_id
+
+
 async def list_pending_bookings(db: AsyncIOMotorDatabase) -> list[dict]:
     bookings = (
         await db["bookings"]
@@ -362,10 +391,11 @@ async def list_pending_bookings(db: AsyncIOMotorDatabase) -> list[dict]:
         .sort("created_at", 1)
         .to_list(length=200)
     )
+    users_by_id, slots_by_id = await _load_users_and_slots_for(db, bookings)
     enriched = []
     for b in bookings:
-        user = await db["users"].find_one({"_id": b["user_id"]}, {"password": 0})
-        slot = await db["slots"].find_one({"_id": b["slot_id"]})
+        user = users_by_id.get(b["user_id"])
+        slot = slots_by_id.get(b["slot_id"])
         enriched.append(
             {
                 "id": str(b["_id"]),
@@ -503,10 +533,11 @@ async def list_all_bookings(
         .limit(page_size)
         .to_list(length=page_size)
     )
+    users_by_id, slots_by_id = await _load_users_and_slots_for(db, bookings)
     enriched = []
     for b in bookings:
-        user = await db["users"].find_one({"_id": b["user_id"]}, {"password": 0})
-        slot = await db["slots"].find_one({"_id": b["slot_id"]})
+        user = users_by_id.get(b["user_id"])
+        slot = slots_by_id.get(b["slot_id"])
         enriched.append(
             {
                 "id": str(b["_id"]),
