@@ -93,7 +93,7 @@ app.include_router(admin.router)
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
-@app.get("/health", tags=["Health"])
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["Health"])
 async def health():
     return {"status": "ok", "version": "1.0.0"}
 
