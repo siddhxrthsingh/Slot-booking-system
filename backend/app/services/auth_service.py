@@ -102,6 +102,29 @@ def _hash_token(token: str) -> str:
 # campus_code returned by PESUAuth: 1 = RR, 2 = EC
 _CAMPUS_CODE_MAP = {1: "RR", 2: "EC"}
 
+# PESUAuth may return the full campus name; map (casefolded) to our codes.
+_CAMPUS_NAME_MAP = {
+    "rr": "RR",
+    "ec": "EC",
+    "pes university (ring road)": "RR",
+    "pes university (electronic city)": "EC",
+}
+
+
+def normalize_campus(value: str | None) -> str | None:
+    """
+    Map an external PESUAuth campus value to a canonical code ("RR"/"EC").
+    Returns None when no campus was provided. Raises ValueError for an
+    unrecognised value rather than guessing.
+    """
+    if value is None or not str(value).strip():
+        return None
+    key = " ".join(str(value).split()).casefold()
+    code = _CAMPUS_NAME_MAP.get(key)
+    if code is None:
+        raise ValueError(f"Unsupported PESUAuth campus value: {value!r}")
+    return code
+
 
 async def verify_pesu_credentials(username: str, password: str) -> dict | None:
     """
@@ -147,7 +170,9 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
         raw = data.get("profile") or {}
 
         # campus field is "RR"/"EC" string; fall back to campus_code int if missing.
-        campus = raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
+        campus = normalize_campus(
+            raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
+        )
 
         return {
             "srn":      raw.get("srn") or raw.get("prn") or username.upper(),
