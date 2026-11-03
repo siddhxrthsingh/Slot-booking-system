@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -11,7 +11,7 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
-def ensure_utc(value: datetime | None) -> datetime | None:
+def ensure_utc(value: "datetime | date | str | None") -> datetime | None:
     """Attach UTC tzinfo to a naive datetime read back from MongoDB.
 
     Motor/PyMongo always stores instants as UTC but returns them as naive
@@ -24,6 +24,17 @@ def ensure_utc(value: datetime | None) -> datetime | None:
     """
     if value is None:
         return None
+    if isinstance(value, str):
+        # Legacy/malformed documents may hold ISO strings ("2026-09-07",
+        # "2026-09-07T00:00:00.000Z"). Parse without shifting the calendar day:
+        # date-only and naive strings are treated as UTC, like BSON values.
+        text = value.strip()
+        if not text:
+            return None
+        value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    elif not isinstance(value, datetime):
+        # plain date -> midnight UTC (slot dates are UTC-midnight day buckets)
+        value = datetime(value.year, value.month, value.day)
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 

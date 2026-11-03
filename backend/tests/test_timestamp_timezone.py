@@ -26,6 +26,17 @@ class EnsureUtcTests(unittest.TestCase):
     def test_none_passes_through(self):
         self.assertIsNone(ensure_utc(None))
 
+    def test_iso_strings_are_parsed_without_shifting_day(self):
+        expected = datetime(2026, 9, 7, tzinfo=timezone.utc)
+        self.assertEqual(ensure_utc("2026-09-07"), expected)
+        self.assertEqual(ensure_utc("2026-09-07T00:00:00"), expected)
+        self.assertEqual(ensure_utc("2026-09-07T00:00:00.000Z"), expected)
+        self.assertIsNone(ensure_utc(""))
+
+    def test_plain_date_becomes_midnight_utc(self):
+        from datetime import date
+        self.assertEqual(ensure_utc(date(2026, 9, 7)), datetime(2026, 9, 7, tzinfo=timezone.utc))
+
     def test_known_utc_instant_converts_to_correct_ist_display_time(self):
         # 12:31 UTC == 18:01 IST (UTC+5:30) on the same calendar day.
         naive_from_mongo = datetime(2026, 9, 7, 12, 31, 0)
