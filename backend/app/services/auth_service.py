@@ -17,6 +17,13 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
+def _mask_srn(srn: str | None) -> str:
+    """Mask an SRN for diagnostic logs, e.g. PES1UG25AM400 -> PES1***M400."""
+    if not srn or len(srn) < 9:
+        return "***"
+    return f"{srn[:4]}***{srn[-4:]}"
+
+
 # ---------------------------------------------------------------------------
 # Admin (employee-ID) login — no external API required
 # ---------------------------------------------------------------------------
@@ -169,6 +176,22 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
 
         raw = data.get("profile") or {}
 
+        # TEMP DIAGNOSTIC (missing-phone investigation): log field presence and
+        # types only. Never log values.
+        logger.info(
+            "PESUAuth phone diagnostic srn=%s profile_keys=%s "
+            "phone_present=%s phone_type=%s phone_non_empty=%s "
+            "phone_number_present=%s phone_number_type=%s phone_number_non_empty=%s",
+            _mask_srn(raw.get("srn") or raw.get("prn")),
+            sorted(raw.keys()),
+            "phone" in raw,
+            type(raw["phone"]).__name__ if "phone" in raw else None,
+            bool(raw.get("phone")),
+            "phone_number" in raw,
+            type(raw["phone_number"]).__name__ if "phone_number" in raw else None,
+            bool(raw.get("phone_number")),
+        )
+
         # campus field is "RR"/"EC" string; fall back to campus_code int if missing.
         campus = normalize_campus(
             raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
@@ -257,6 +280,16 @@ async def upsert_user(db: AsyncIOMotorDatabase, profile: dict) -> dict:
         },
         upsert=True,
         return_document=True,
+    )
+
+    # TEMP DIAGNOSTIC (missing-phone investigation)
+    logger.info(
+        "upsert_user phone diagnostic srn=%s phone_in_update=%s "
+        "update_returned_doc=%s phone_stored_in_db=%s",
+        _mask_srn(srn),
+        "phone" in set_fields,
+        result is not None,
+        bool(result and result.get("phone")),
     )
     return result
 
