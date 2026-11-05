@@ -324,31 +324,6 @@ Interactive docs are at `/docs` when the backend is running.
 
 The live app runs the frontend on Vercel, the backend on Render and the database on MongoDB Atlas. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full steps and environment variables.
 
----
-
-## Known limitations
-
-- **Free-tier hosting.** The backend and database run on free tiers, so the backend can go to sleep when idle and the first request or login after a quiet period can take around 30 seconds. More users would need either college-hosted servers or a small hosting budget.
-- **RR campus only.** EC campus support is waiting on its facility and timing requirements.
-- **Holidays and closures.** Holiday and closure handling is not built yet. College holidays are meant to follow the Sunday schedule.
-- **Email.** Notifications are skipped unless SMTP is configured.
-
----
-
-## Roadmap
-
-- Notice board for announcements: sports selections, trials, practice matches and inter-college events
-- Holiday and facility closure handling
-- EC campus
-- Hosting on college servers or a funded plan for campus-wide use
-- The same booking model for other campus needs, such as hostel and seminar hall booking
-
----
-
 ## Author
-
-Built by **Siddharth Singh**, PES University.
-
-## License
-
-This project is for academic purposes at PES University. All rights reserved.
+ 
+Built by **Siddharth Singh**
