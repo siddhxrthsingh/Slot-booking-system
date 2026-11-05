@@ -72,61 +72,6 @@ Booking a court used to mean walking to the ground and writing your name in a re
 
 ## Features
 
-### Student portal
-- **PESUAuth login.** Sign in with SRN, PRN, email or phone number through the PESU authentication service.
-- **Facility-aware slots.** Browse Badminton, Table Tennis, Squash, Basketball and Volleyball for today and the next two days, with live "joined" counts.
-- **Join a shared slot.** A court or table is shared by several students (see capacities below). Joining is confirmed instantly.
-- **Leader tag.** The first student to join a slot is its leader and is the accountable person.
-- **My bookings and history.** See your active slots, leave a slot, and review past activity.
-- **Daily limit counter.** See how many of your 2 daily slots you have used.
-- **Ban banner.** A clear notice with the expiry time if booking is paused.
-
-### Admin console
-| Page | What it does |
-|------|--------------|
-| **Dashboard** | Live metrics (active slots, occupancy, total and confirmed bookings, students, active bans) and a form to create a one-off slot for any facility, date and time |
-| **Facilities** | The 11 RR facilities with sport, type, capacity and status |
-| **Schedule** | Schedule templates by sport or facility and by day type (weekday, Saturday, Sunday). Create, edit, deactivate or delete |
-| **Slots** | Every slot with its occupancy bar and Open or Full status. Open the **Roster**, edit, cancel or delete a slot |
-| **Bookings** | Complete booking history with force-cancel |
-| **Bans** | Students currently paused, the reason, and a Lift ban button |
-
-### Facilities and capacity (RR campus)
-| Sport | Facilities | Capacity each |
-|-------|-----------|:-------------:|
-| Badminton | Courts 1 to 3 | 6 |
-| Table Tennis | Tables 1 to 3 | 6 |
-| Squash | Courts 1 and 2 | 6 |
-| Basketball | Courts 1 and 2 | 12 |
-| Volleyball | Court 1 | 12 |
-
-### Booking rules (enforced on the backend)
-- **Shared slots.** Many students can join the same slot, up to its capacity. Capacity is checked and updated atomically, so two students tapping Join at the same moment can never overbook a slot.
-- **2 active slots per student per day,** across all sports and facilities.
-- **No overlapping slots** for the same student.
-- **Leader.** The first active participant is the leader. If the leader leaves, the earliest remaining participant takes over.
-- **No rejoining.** Once you leave a slot you cannot rejoin that same slot.
-- **2-hour cancellation window.** Leaving less than 2 hours before the start triggers an automatic **2-day booking ban**. Both values are configurable.
-- **History is kept.** Cancelling never deletes a booking. It records who joined, when, who cancelled and a snapshot of their details.
-
-### Privacy
-Students only ever see how many people have joined a slot, never who. Names, SRNs and phone numbers are returned only to admin accounts.
-
-### Schedule templates and slot generation
-Schedules live in MongoDB as **templates**, not in code. A template says which hours of a day are staff, cleaning, lunch or student time. Facility-specific templates override sport-level ones, and only student hours become bookable 1-hour slots. Slots for a date are generated automatically the first time that date is viewed. Re-running generation never resets existing bookings, and manually created slots are never overwritten.
-
-### Real-time updates (WebSocket)
-Open dashboards refresh instantly when anyone joins, leaves or when a slot changes. The frontend reconnects automatically if the connection drops.
-
-### Security and auth
-- JWT access tokens plus opaque refresh tokens (stored hashed in the database).
-- Tokens are kept in `sessionStorage` and cleared when the tab closes.
-- Rate limiting on the login endpoint (`slowapi`).
-- Admin routes are protected by an admin-only guard.
-
-### Email notifications (optional)
-Booking and cancellation emails, silently skipped if SMTP is not configured.
-
 ---
 
 ## Tech stack
@@ -345,10 +290,5 @@ The live app runs the frontend on Vercel, the backend on Render and the database
 
 ---
 
-## Author
-
-Built by **Siddharth Singh**, PES University.
-
-## License
 
 This project is for academic purposes at PES University. All rights reserved.
