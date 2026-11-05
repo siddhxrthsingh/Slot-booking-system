@@ -8,13 +8,30 @@ class BookingCreate(BaseModel):
     notes: str | None = None
 
 
+class UserSnapshotSchema(BaseModel):
+    name: str | None = None
+    srn: str | None = None
+    phone: str | None = None
+    branch: str | None = None
+    program: str | None = None
+    semester: str | None = None
+    section: str | None = None
+    campus: str | None = None
+
+
 class BookingResponse(BaseModel):
     id: str
+    user_id: str | None = None
     slot_id: str
+    facility_id: str | None = None
     sport: str
     status: Literal["confirmed", "pending_approval", "cancelled"]
     booking_date: datetime
+    joined_at: datetime | None = None
     cancelled_at: datetime | None = None
+    cancelled_by: str | None = None
+    is_leader: bool = False
+    user_snapshot: UserSnapshotSchema | None = None
     notes: str | None = None
     created_at: datetime
 

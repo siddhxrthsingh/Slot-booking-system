@@ -2,323 +2,293 @@
 
 <img src="frontend/frontend/public/pesu-logo.png" alt="PESU Logo" width="120"/>
 
-# PESU Sports Slot Booking System
+# Campus Arena: PESU Sports Slot Booking System
 
-**A full-stack sports facility booking portal for PES University**  
-Book slots for 8 sports across RR and EC campuses — with real-time updates, admin controls, and automatic ban enforcement.
+**An online sports slot booking portal for PES University, RR Campus**  
+Students see what is available and join shared slots. The sports department gets a full admin console with rosters, history and automatic bans.
+
+**Live demo:** [slot-booking-system.vercel.app](https://slot-booking-system.vercel.app)
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react)](https://react.dev/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react)](https://react.dev/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248?style=flat&logo=mongodb)](https://www.mongodb.com/atlas)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat&logo=vite)](https://vitejs.dev/)
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python)](https://www.python.org/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?style=flat&logo=vite)](https://vitejs.dev/)
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=flat&logo=python)](https://www.python.org/)
 
 </div>
 
 ---
 
+## Why this exists
+
+Booking a court used to mean walking to the ground and writing your name in a register. That is slow for the sports department, unfair to day scholars who live far from campus, and leaves no record of who actually used a court. Campus Arena moves all of it online:
+
+- **Fair for everyone.** Day scholars and hostellers see the same slots at the same time.
+- **Clear availability.** Staff, cleaning and lunch hours are never shown as bookable.
+- **Accountable.** For every slot, admins can see who joined, who was the leader and who cancelled.
+
+---
+
 ## Screenshots
 
-**Login Page**  
-![Login Page](docs/screenshots/login.png)
+### Student view
 
-**Student Dashboard**  
-![Student Dashboard](docs/screenshots/dashboard.png)
+**Sign in with PESU credentials**
+![Sign in](docs/screenshots/01-login.png)
 
-**Book a Slot**  
-![Book a Slot](docs/screenshots/book-slot.png)
+**Home: pick a day and a sport**
+![Student home](docs/screenshots/02-student-home.png)
 
-**Admin Panel — Overview**  
-![Admin Panel Overview](docs/screenshots/admin-panel.png)
+**Join a shared slot (1/6 joined, Leader tag, Leave slot)**
+![Join a slot](docs/screenshots/03-join-a-slot.png)
 
-**Admin Panel — Live Metrics & Create Slot**  
-![Admin Panel Metrics](docs/screenshots/admin-overview.png)
+### Admin console
+
+**Dashboard: live metrics and Create Slot**
+![Admin dashboard](docs/screenshots/04-admin-dashboard.png)
+
+**Facilities: all 11 RR facilities with capacity**
+![Admin facilities](docs/screenshots/05-admin-facilities.png)
+
+**Schedule: staff, cleaning, lunch and student periods**
+![Admin schedule](docs/screenshots/06-admin-schedule.png)
+
+**Create or edit a schedule template**
+![Schedule template form](docs/screenshots/07-admin-schedule-form.png)
+
+**Slots: occupancy per slot, with Roster, Edit, Cancel and Delete**
+![Admin slots](docs/screenshots/08-admin-slots.png)
+
+**Roster: who joined a slot, for accountability** (personal details blurred in this README)
+![Slot roster](docs/screenshots/09-admin-roster.png)
+
+**Complete booking history** (names blurred in this README)
+![Booking history](docs/screenshots/10-admin-bookings.png)
+
+**Active bans, with Lift ban** (name and email blurred in this README)
+![Active bans](docs/screenshots/11-admin-bans.png)
 
 ---
 
 ## Features
 
-### Student Portal
-- **PESUAuth Login** — sign in with SRN, PRN, email, or phone number via the PESU authentication API
-- **Sport Cards** — browse available slots for all 8 sports with live seat counts
-- **Campus & Sport Filters** — quickly find slots by RR or EC campus
-- **Book a Slot** — instant confirmation with conflict detection (no double-booking, no time clashes)
-- **My Bookings** — view and cancel your upcoming bookings (with late-cancel warning)
-- **Ban Banner** — clear notification if suspended, with expiry time shown
-
-### Admin Portal
-| Tab | Capabilities |
-|-----|-------------|
-| **Overview** | Live metrics — total slots, occupancy %, confirmed bookings, active bans, registered students; Create Slot form |
-| **Manage Slots** | View all slots; inline Edit and permanent Delete per slot |
-| **All Bookings** | Full booking history; force-cancel any active booking |
-| **Bans** | View all active suspensions; Lift Ban for any student |
-
-### Booking Rules (enforced server-side)
-- Auto-confirm — all bookings immediately set to `confirmed`
-- **1 booking per sport per day** per student
-- **Time-clash prevention** — can't overlap two sports at the same time
-- **2-hour cancellation window** — cancellations must be made ≥ 2 hours before slot start
-- **Late-cancel ban** — cancelling inside the 2-hour window triggers an automatic **2-day booking ban**
-- Banned students are blocked from making new bookings
-
-### Real-Time Updates (WebSocket)
-- All connected dashboards refresh instantly on any booking or slot change
-- Events: `slot_created`, `slot_updated`, `slot_cancelled`, `booking_created`, `booking_cancelled`
-- Frontend reconnects automatically with exponential backoff (up to 10 retries)
-
-### Security & Auth
-- JWT access tokens (60 min) + opaque refresh tokens (hashed in DB, 1-day expiry)
-- Tokens stored in `sessionStorage` — cleared automatically on tab close
-- Axios interceptor queues concurrent requests and auto-refreshes on 401
-- Rate limiting on login endpoint via `slowapi`
-
 ---
 
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
 | Backend framework | FastAPI 0.115 + Uvicorn |
 | Database | MongoDB Atlas (Motor async driver) |
-| Auth | JWT (`python-jose`) + bcrypt (`passlib`) |
+| Auth | PESUAuth for students, employee-ID login for admins, JWT (`python-jose`) |
 | HTTP client | httpx (PESUAuth integration) |
 | Rate limiting | slowapi |
 | Email | aiosmtplib |
 | Real-time | WebSockets (native FastAPI) |
-| Schema validation | Pydantic v2 |
-| Frontend | React 18 + Vite 5 |
-| Routing | React Router v6 |
-| HTTP (client) | Axios with interceptor |
-| State management | Context API + sessionStorage |
-| External auth API | [PESUAuth](https://pesu-auth.onrender.com) |
+| Validation | Pydantic v2 |
+| Frontend | React 19 + Vite 8 |
+| Routing and HTTP | React Router 7, Axios |
+| Hosting | Vercel (frontend), Render (backend), MongoDB Atlas (database) |
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-pesu_sports_slot_booking_system/
+Slot-booking-system/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py               # FastAPI app, CORS, WebSocket /ws endpoint
-│   │   ├── config.py             # Settings loaded from .env
-│   │   ├── database.py           # MongoDB connect/close, get_db dependency
-│   │   ├── dependencies.py       # JWT bearer, get_current_user, require_admin
-│   │   ├── ws_manager.py         # WebSocket ConnectionManager singleton
-│   │   ├── utils.py              # success_response / error_response helpers
-│   │   ├── routers/
-│   │   │   ├── auth.py           # POST /auth/login, /refresh, /logout, /me
-│   │   │   ├── bookings.py       # GET /bookings/available, POST /create, GET /my-bookings, DELETE /{id}
-│   │   │   └── admin.py          # Full CRUD for slots, bookings, bans, users
+│   │   ├── main.py                    # FastAPI app, CORS, /health, WebSockets
+│   │   ├── config.py                  # Settings loaded from .env
+│   │   ├── database.py                # MongoDB connection
+│   │   ├── dependencies.py            # JWT guards (current user, admin only)
+│   │   ├── ws_manager.py              # WebSocket connection manager
+│   │   ├── routers/                   # auth.py, bookings.py, admin.py
 │   │   ├── services/
-│   │   │   ├── auth_service.py   # PESUAuth integration, admin login, JWT, sessions
-│   │   │   ├── booking_service.py# All booking rules and ban logic
-│   │   │   ├── admin_service.py  # Slot/booking management, metrics
-│   │   │   └── email_service.py  # aiosmtplib notifications
-│   │   ├── schemas/              # Pydantic request/response models
-│   │   └── models/               # MongoDB document shapes
-│   ├── .env.example              # Template — copy to .env and fill in values
-│   ├── requirements.txt
-│   ├── seed_data.py              # Seeds all 8 sports × 2 campuses
-│   └── setup_db.py               # Creates MongoDB indexes
-│
-└── frontend/frontend/
-    ├── src/
-    │   ├── api/
-    │   │   ├── client.js         # Axios instance, JWT interceptor, auto-refresh queue
-    │   │   ├── auth.js           # login, logout, refreshToken, getMe
-    │   │   ├── bookings.js       # getAvailableSlots, createBooking, cancelBooking, getMyBanStatus
-    │   │   └── admin.js          # All admin API calls
-    │   ├── context/
-    │   │   └── AuthContext.jsx   # Session-only auth state (sessionStorage)
-    │   ├── hooks/
-    │   │   └── useWebSocket.js   # Auto-reconnecting WebSocket hook
-    │   ├── components/
-    │   │   └── ProtectedRoute.jsx
-    │   └── pages/
-    │       ├── Login.jsx         # PESU-styled login page
-    │       └── Dashboard.jsx     # Full student + admin portal
-    ├── public/
-    │   ├── pesu-logo.png
-    │   └── images/               # Sport hero images (football, basketball, cricket, …)
-    └── vite.config.js            # Proxies /api → :8000 and /ws → ws://localhost:8000
+│   │   │   ├── auth_service.py        # PESUAuth, admin login, tokens
+│   │   │   ├── booking_service.py     # Join, leave, limits, bans
+│   │   │   ├── admin_service.py       # Slots, roster, metrics, templates
+│   │   │   ├── slot_generation_service.py  # Slots from schedule templates
+│   │   │   └── email_service.py
+│   │   ├── schemas/                   # Request and response models
+│   │   └── models/                    # users, facilities, slots, bookings,
+│   │                                  # schedule_templates, sessions
+│   ├── tests/                         # Unit tests for booking, admin, slots, WebSockets
+│   ├── setup_db.py                    # Creates MongoDB indexes
+│   ├── seed_facilities.py             # Seeds the 11 RR facilities
+│   ├── seed_schedule_templates.py     # Seeds the RR schedule templates
+│   ├── .env.example
+│   └── requirements.txt
+├── frontend/frontend/
+│   ├── src/
+│   │   ├── api/                       # Axios client and API calls
+│   │   ├── context/AuthContext.jsx    # Session-only auth state
+│   │   ├── hooks/                     # WebSocket hooks
+│   │   ├── components/ProtectedRoute.jsx
+│   │   └── pages/                     # Login.jsx, Dashboard.jsx (student and admin)
+│   └── vite.config.js
+└── docs/
+    ├── DEPLOYMENT.md                  # Vercel + Render + Atlas guide
+    ├── PROJECT_HANDOVER.md
+    └── screenshots/
 ```
 
 ---
 
-## Prerequisites
+## Getting started
 
-| Tool | Minimum Version |
-|------|----------------|
-| Python | 3.11+ |
+### Prerequisites
+
+| Tool | Version |
+|------|---------|
+| Python | 3.13 recommended (3.11+ should work) |
 | Node.js | 18+ |
-| npm | 9+ |
-| MongoDB Atlas account | — (free tier works) |
+| MongoDB Atlas account | Free tier works |
 
----
-
-## Getting Started
-
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
 git clone https://github.com/siddhxrthsingh/Slot-booking-system.git
 cd Slot-booking-system
 ```
 
-### 2. Backend Setup
+### 2. Backend
 
 ```bash
 cd backend
-
-# Create and activate virtual environment
 python -m venv venv
 
 # Windows
 .\venv\Scripts\activate
-
 # macOS / Linux
 source venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
-```
-
-#### Configure environment variables
-
-```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in your values:
+Open `.env` and fill in your own values. The main ones:
 
-```env
-APP_ENV=development
-SECRET_KEY=your-super-secret-key-change-this-in-production
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-REFRESH_TOKEN_EXPIRE_DAYS=1
+| Variable | Purpose |
+|----------|---------|
+| `SECRET_KEY` | Long random string used to sign tokens |
+| `MONGO_URI`, `MONGO_DB_NAME` | Your MongoDB Atlas connection |
+| `PESU_AUTH_URL` | The PESUAuth endpoint |
+| `FRONTEND_ORIGIN` | Allowed frontend origin(s), comma-separated |
+| `ADMIN_EMPLOYEE_IDS`, `ADMIN_PASSWORD`, `ADMIN_NAME`, `ADMIN_EMAIL` | Admin sign-in. Choose your own strong password and never commit `.env` |
+| `CANCEL_WINDOW_HOURS`, `BAN_DURATION_DAYS` | Booking policy (default 2 hours and 2 days) |
+| `RATE_LIMIT_LOGIN` | Login rate limit |
+| `SMTP_*` | Optional email settings |
 
-MONGO_URI=mongodb+srv://<user>:<password>@cluster.mongodb.net/
-MONGO_DB_NAME=slot_booking
-
-PESU_AUTH_URL=https://pesu-auth.onrender.com/authenticate
-FRONTEND_ORIGIN=http://localhost:5173
-
-ADMIN_EMPLOYEE_ID=EMP001
-ADMIN_PASSWORD=admin123
-ADMIN_NAME=Sports Admin
-ADMIN_EMAIL=admin@pesu.edu
-
-# Booking policy
-CANCEL_WINDOW_HOURS=2
-BAN_DURATION_DAYS=2
-
-# Email (optional — leave blank to disable)
-# SMTP_HOST=smtp.gmail.com
-# SMTP_PORT=587
-# SMTP_USER=your@gmail.com
-# SMTP_PASSWORD=your-app-password
-# EMAIL_FROM=your@gmail.com
-```
-
-#### Initialize the database
+Create the indexes and seed the RR campus data, then start the server:
 
 ```bash
-# Create MongoDB indexes
 python setup_db.py
+python seed_facilities.py
+python seed_schedule_templates.py
 
-# Seed sport slots for all 8 sports × RR + EC campuses
-python seed_data.py
-```
-
-#### Start the backend server
-
-```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-API docs available at `http://localhost:8000/docs`
+Both seed scripts are safe to re-run, and accept `--verify-only` to check the data without changing it. You do not need to create slots by hand. They are generated from the schedule templates. (`seed_data.py` is an older sample-slot script and is not needed for the current version.)
 
----
+API docs: `http://localhost:8000/docs`
 
-### 3. Frontend Setup
+### 3. Frontend
 
 ```bash
 cd frontend/frontend
-
 npm install
-
 npm run dev
 ```
 
-Frontend runs at `http://localhost:5173`  
-Vite automatically proxies `/api` → `http://localhost:8000` and `/ws` → `ws://localhost:8000`
+The app runs at `http://localhost:5173`. In development, Vite proxies `/api` to the backend and `/ws` to its WebSocket, so no extra configuration is needed. For production, set `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` (see `frontend/frontend/.env.example`).
+
+### 4. Admin access
+
+Admins sign in with an **Employee ID** from `ADMIN_EMPLOYEE_IDS` and the password you set in `ADMIN_PASSWORD`. Students sign in with their PESU credentials.
+
+### 5. Tests
+
+```bash
+cd backend
+python -m unittest discover -s tests -t .
+```
 
 ---
 
-## Default Credentials
+## API overview
 
-> **Note:** These are default development credentials. Change `ADMIN_EMPLOYEE_ID` and `ADMIN_PASSWORD` in your `.env` before any public deployment.
+Interactive docs are at `/docs` when the backend is running.
 
-| Role | Field | Value |
-|------|-------|-------|
-| Admin | Employee ID | `EMP001` |
-| Admin | Password | `admin123` |
-| Student | — | Log in via PESU SRN / PRN / email / phone |
+### Authentication
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/login` | Student (PESUAuth) or admin login |
+| `POST` | `/auth/refresh` | Get a new access token |
+| `POST` | `/auth/logout` | End the session |
+| `GET` | `/auth/me` | Current user |
 
----
+### Student
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/bookings/available` | Slots by sport and date, with occupancy only |
+| `POST` | `/bookings/create` | Join a slot |
+| `GET` | `/bookings/my-bookings` | Your bookings and history |
+| `GET` | `/bookings/my-ban` | Your ban status |
+| `DELETE` | `/bookings/{id}` | Leave a slot |
 
-## Supported Sports
+### Admin
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/admin/metrics` | Dashboard numbers |
+| `GET` | `/admin/facilities` | Facility inventory |
+| `GET` `POST` | `/admin/schedule-templates` | List or create templates |
+| `PATCH` `DELETE` | `/admin/schedule-templates/{id}` | Edit or delete a template |
+| `GET` | `/admin/slots` | All slots with occupancy |
+| `POST` | `/admin/slots/create` | Create a manual slot |
+| `PATCH` | `/admin/slots/{id}` | Edit a slot |
+| `DELETE` | `/admin/slots/{id}/cancel` | Cancel a slot |
+| `DELETE` | `/admin/slots/{id}/delete` | Delete a slot |
+| `GET` | `/admin/slots/{id}/roster` | Who joined a slot |
+| `GET` | `/admin/bookings` | Complete booking history |
+| `DELETE` | `/admin/bookings/{id}/cancel` | Force-cancel a booking |
+| `GET` | `/admin/bans` | Active bans |
+| `DELETE` | `/admin/bans/{user_id}` | Lift a ban |
+| `GET` | `/admin/users` | Registered students |
 
-| Sport | RR Campus | EC Campus |
-|-------|:---------:|:---------:|
-| Football | ✅ | ✅ |
-| Basketball | ✅ | ✅ |
-| Cricket | ✅ | ✅ |
-| Badminton | ✅ | ✅ |
-| Volleyball | ✅ | ✅ |
-| Squash | ✅ | ✅ |
-| Table Tennis | ✅ | ✅ |
-| Chess | ✅ | ✅ |
-
----
-
-## API Overview
-
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `POST` | `/auth/login` | — | Student (PESUAuth) or Admin login |
-| `POST` | `/auth/refresh` | Refresh token | Get new access token |
-| `POST` | `/auth/logout` | JWT | Invalidate session |
-| `GET` | `/auth/me` | JWT | Current user info |
-| `GET` | `/bookings/available` | JWT | List available slots (filterable) |
-| `POST` | `/bookings/create` | JWT | Create a booking |
-| `GET` | `/bookings/my-bookings` | JWT | Student's own bookings |
-| `GET` | `/bookings/my-ban` | JWT | Student's current ban status |
-| `DELETE` | `/bookings/{id}` | JWT | Cancel a booking |
-| `GET` | `/admin/slots` | Admin | All slots |
-| `POST` | `/admin/slots` | Admin | Create slot |
-| `PUT` | `/admin/slots/{id}` | Admin | Edit slot |
-| `DELETE` | `/admin/slots/{id}` | Admin | Delete slot |
-| `GET` | `/admin/bookings` | Admin | All bookings |
-| `DELETE` | `/admin/bookings/{id}` | Admin | Force-cancel booking |
-| `GET` | `/admin/bans` | Admin | Active bans |
-| `DELETE` | `/admin/bans/{id}` | Admin | Lift a ban |
-| `WS` | `/ws` | — | Real-time event stream |
+### Other
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `WS /ws`, `WS /ws/occupancy` | Real-time event streams |
 
 ---
 
-## Known Limitations
+## Deployment
 
-- **PESUAuth cold starts** — PESUAuth is hosted on Render's free tier. The first login after a period of inactivity may take ~30 seconds. This is handled with a 35-second timeout in the backend.
-- **Swimming / Tennis** — these sports may still exist in the database if you ran an older version of `seed_data.py`. Use the admin **Manage Slots → Delete** button to remove them.
-- **Email notifications** — silently skipped unless SMTP credentials are set in `.env`.
+The live app runs the frontend on Vercel, the backend on Render and the database on MongoDB Atlas. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the full steps and environment variables.
 
 ---
 
+## Known limitations
+
+- **Free-tier hosting.** The backend and database run on free tiers, so the backend can go to sleep when idle and the first request or login after a quiet period can take around 30 seconds. More users would need either college-hosted servers or a small hosting budget.
+- **RR campus only.** EC campus support is waiting on its facility and timing requirements.
+- **Holidays and closures.** Holiday and closure handling is not built yet. College holidays are meant to follow the Sunday schedule.
+- **Email.** Notifications are skipped unless SMTP is configured.
+
 ---
 
-<div align="center">
-  Built with <3
-</div>
+## Roadmap
+
+- Notice board for announcements: sports selections, trials, practice matches and inter-college events
+- Holiday and facility closure handling
+- EC campus
+- Hosting on college servers or a funded plan for campus-wide use
+- The same booking model for other campus needs, such as hostel and seminar hall booking
+
+---
+
+
+This project is for academic purposes at PES University. All rights reserved.

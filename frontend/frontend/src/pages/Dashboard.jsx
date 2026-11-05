@@ -1,7 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { useOccupancySocket } from '../hooks/useOccupancySocket';
+import {
+  formatDateDMY,
+  formatDateTimeIST,
+  isoDateOnly,
+  istCalendarDate,
+  istDateKey,
+  slotTimeToUtcInstant,
+} from '../utils/datetime';
 import {
   getAvailableSlots,
   createBooking,
@@ -22,19 +31,13 @@ import {
   getActiveBans,
   unbanUser,
   getAdminSlots,
+  getFacilities,
+  getSlotRoster,
+  getScheduleTemplates,
+  createScheduleTemplate,
+  updateScheduleTemplate,
+  deleteScheduleTemplate,
 } from '../api/admin';
-
-// ── Sport metadata ────────────────────────────────────────────────────────────
-const SPORT_META = {
-  Football:       { image: '/images/football-hero.jpg', accent: 'Evening practice blocks and inter-department matches.' },
-  Basketball:     { image: '/images/basketball.jpg',    accent: 'Quick drills, team scrims, and PE activity bookings.' },
-  Cricket:        { image: '/images/cricket.jpg',       accent: 'Net sessions, bowling drills, and team trials access.' },
-  Badminton:      { image: '/images/badminton.jpg',     accent: 'Singles and doubles court sessions for all skill levels.' },
-  Volleyball:     { image: '/images/volleyball.jpg',    accent: 'Team practice sessions and inter-department tournaments.' },
-  Squash:         { image: '/images/squash.jpg',        accent: 'Booked court sessions with equipment provided on site.' },
-  'Table Tennis': { image: '/images/table-tennis.jpg',  accent: 'Competitive and casual table sessions in the indoor hall.' },
-  Chess:          { image: '/images/chess.jpg',         accent: 'Strategy board game sessions and inter-college practice.' },
-};
 
 const announcements = [
   'Inter-college football selections begin this month.',
@@ -50,6 +53,21 @@ const upcomingEvents = [
 const SPORTS_LIST = ['Football', 'Basketball', 'Cricket', 'Badminton', 'Volleyball', 'Squash', 'Table Tennis', 'Chess'];
 const CAMPUSES    = ['RR', 'EC'];
 
+// Maps a sport name (as returned by the backend) to an existing real sport
+// photo for the facility card header. Purely a presentational asset choice —
+// it does not add sports/facilities to the bookable inventory, which still
+// comes entirely from the API.
+const SPORT_IMAGES = {
+  Badminton:      '/images/badminton.jpg',
+  Basketball:     '/images/basketball.jpg',
+  'Table Tennis': '/images/table-tennis.jpg',
+  Squash:         '/images/squash.jpg',
+  Volleyball:     '/images/volleyball.jpg',
+};
+const DEFAULT_FACILITY_IMAGE = '/images/pesu-campus.jpg';
+
+const MAX_ACTIVE_SLOTS_PER_DAY = 2; // mirrors the backend's locked daily-quota rule
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtStatus(s) {
   return (s || '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -58,44 +76,91 @@ function fmtDate(d) {
   if (!d) return '';
   return new Date(d).toISOString().slice(0, 10);
 }
+// Point-in-time timestamps (joined_at, cancelled_at, banned_until, ...)
+// always render in IST as DD-MM-YYYY, hh:mm AM/PM.
 function fmt(d) {
-  if (!d) return '—';
-  return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return formatDateTimeIST(d);
 }
 function fmtBanDate(d) {
-  if (!d) return '—';
-  return new Date(d).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return formatDateTimeIST(d);
+}
+function initials(name, srn) {
+  const source = (name || srn || '').trim();
+  if (!source) return '—';
+  const parts = source.split(/\s+/);
+  return parts.length > 1
+    ? (parts[0][0] + parts[1][0]).toUpperCase()
+    : source.slice(0, 2).toUpperCase();
 }
 
 // ── Blank slot form ───────────────────────────────────────────────────────────
+// Manual slots are tied to a real RR facility — sport/venue/capacity are
+// derived server-side from the selected facility, never entered here.
 const BLANK_SLOT = {
-  sport: 'Football', date: '', start_time: '', end_time: '',
-  venue: '', campus: 'RR', capacity: '',
+  facility_id: '', date: '', start_time: '', end_time: '',
+};
+
+const BLANK_PERIOD = {
+  start_time: '', end_time: '', period_type: 'student', is_bookable: true, label: '',
+};
+
+// Sport/facility values are always sourced from the facility list fetched
+// from the backend — never hardcoded here.
+const BLANK_TEMPLATE = {
+  sport: '', facility_scope: 'sport', facility_id: '', day_type: 'weekday',
+  priority: 0, is_active: true, notes: '',
+  periods: [{ ...BLANK_PERIOD }],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const { user, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const location = useLocation();
 
-  const [activePortal, setActivePortal] = useState(
-    searchParams.get('portal') === 'admin' && isAdmin ? 'admin' : 'student'
-  );
+  // Portal is derived entirely from the route (ProtectedRoute already
+  // guarantees /admin is admin-only), not from a one-time state initializer
+  // or a ?portal= query param.
+  const activePortal = location.pathname.startsWith('/admin') && isAdmin ? 'admin' : 'student';
+
+  // An authenticated admin must never accidentally land on the student
+  // dashboard — always send them to the Admin Console.
+  const shouldRedirectToAdmin = isAdmin && location.pathname === '/';
 
   // ── Student state ─────────────────────────────────────────────────────────
   const [slots,            setSlots]            = useState([]);
   const [slotsLoading,     setSlotsLoading]     = useState(true);
   const [myBookings,       setMyBookings]       = useState([]);
   const [bookingsLoading,  setBookingsLoading]  = useState(true);
+  const [bookingsError,    setBookingsError]    = useState(null);
+  const [slotsError,       setSlotsError]       = useState(null);
   const [bookingInProgress,setBookingInProgress]= useState(null);
   const [cancelInProgress, setCancelInProgress] = useState(null);
   const [toast,            setToast]            = useState(null);
   const [banInfo,          setBanInfo]          = useState(null);
 
-  // Student filters
-  const [filterCampus, setFilterCampus] = useState('');
-  const [filterSport,  setFilterSport]  = useState('');
+  // Synchronous guards against double-submit from rapid repeat clicks before
+  // React has a chance to re-render the disabled button state.
+  const bookingLockRef = useRef(new Set());
+  const cancelLockRef  = useRef(new Set());
+  // Timestamp of the most recent locally-confirmed join. Lets the WebSocket
+  // booking_created handler skip the redundant fetchSlots/fetchMyBookings it
+  // would otherwise trigger for the same join we already refreshed locally.
+  const lastLocalJoinAtRef = useRef(0);
+
+  // Click-outside handling for the profile/mobile nav menus.
+  const profileRef = useRef(null);
+
+  // Student filters (RR only for now; sport options are derived from the
+  // facility-aware slot data returned by the backend, not hardcoded)
+  const [filterSport, setFilterSport] = useState('');
+  // Rolling 3-day window: 0 = today, 1 = tomorrow, 2 = day after tomorrow.
+  const [selectedDayOffset, setSelectedDayOffset] = useState(0);
+  // Minute-level tick so expired slots disappear and the rolling window
+  // advances while the page stays open, without polling the backend.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   // ── Admin state ───────────────────────────────────────────────────────────
   const [metrics,           setMetrics]           = useState(null);
@@ -105,7 +170,15 @@ export default function Dashboard() {
   const [approvalInProgress,setApprovalInProgress]= useState(null);
   const [activeBans,        setActiveBans]        = useState([]);
   const [adminSlots,        setAdminSlots]        = useState([]);
-  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans
+  const [facilities,        setFacilities]        = useState([]);
+  const [scheduleTemplates, setScheduleTemplates] = useState([]);
+  const [adminTab,          setAdminTab]          = useState('overview'); // overview | slots | bookings | bans | facilities | schedule
+
+  // Slot roster modal (admin-only accountability view)
+  const [rosterSlotId, setRosterSlotId] = useState(null);
+  const [rosterData,   setRosterData]   = useState(null);
+  const [rosterLoading,setRosterLoading]= useState(false);
+  const [rosterError,  setRosterError]  = useState(null);
 
   // Admin slot creation form
   const [slotForm,       setSlotForm]       = useState(BLANK_SLOT);
@@ -120,6 +193,11 @@ export default function Dashboard() {
   const [adminFilterCampus, setAdminFilterCampus] = useState('');
   const [adminFilterSport,  setAdminFilterSport]  = useState('');
 
+  // Admin schedule template create/edit
+  const [templateForm,        setTemplateForm]        = useState(BLANK_TEMPLATE);
+  const [templateFormLoading, setTemplateFormLoading] = useState(false);
+  const [editingTemplateId,   setEditingTemplateId]   = useState(null); // null = create mode
+
   // ── Toast ─────────────────────────────────────────────────────────────────
   function showToast(msg, ok = true) {
     setToast({ msg, ok });
@@ -130,25 +208,44 @@ export default function Dashboard() {
   const fetchSlots = useCallback(async () => {
     setSlotsLoading(true);
     try {
-      const params = {};
-      if (filterCampus) params.campus = filterCampus;
-      if (filterSport)  params.sport  = filterSport;
-      const data = await getAvailableSlots(params);
-      setSlots(data);
+      // RR only for now — sport filtering happens client-side (below) so the
+      // filter dropdown's option list can be derived from the full set of
+      // facilities/sports the backend actually returns.
+      //
+      // Today, tomorrow, and the day after tomorrow — all three computed from
+      // the current date in Asia/Kolkata (this app serves RR campus only),
+      // never the viewer's browser-local timezone — are requested explicitly
+      // (rather than relying on an implicit "no date" query) so each request
+      // hits the backend's existing lazy generate_slots_for_date() trigger
+      // for that specific date — otherwise slots for a date are never
+      // generated. This is exactly the rolling 3-day booking window. Each
+      // request sends a plain "YYYY-MM-DD" key (no time/offset), so the
+      // backend never has to guess which calendar day was intended.
+      const [todaySlots, tomorrowSlots, dayAfterSlots] = await Promise.all([
+        getAvailableSlots({ campus: 'RR', date: istDateKey(0) }),
+        getAvailableSlots({ campus: 'RR', date: istDateKey(1) }),
+        getAvailableSlots({ campus: 'RR', date: istDateKey(2) }),
+      ]);
+      const byId = new Map();
+      [...todaySlots, ...tomorrowSlots, ...dayAfterSlots].forEach((s) => byId.set(s.id, s));
+      setSlots([...byId.values()]);
+      setSlotsError(null);
     } catch {
+      setSlotsError('Failed to load available slots.');
       showToast('Failed to load available slots.', false);
     } finally {
       setSlotsLoading(false);
     }
-  }, [filterCampus, filterSport]);
+  }, []);
 
   const fetchMyBookings = useCallback(async () => {
     setBookingsLoading(true);
     try {
       const data = await getMyBookings();
       setMyBookings(data);
+      setBookingsError(null);
     } catch {
-      // silent
+      setBookingsError('Failed to load your bookings.');
     } finally {
       setBookingsLoading(false);
     }
@@ -169,18 +266,30 @@ export default function Dashboard() {
       const params = {};
       if (adminFilterCampus) params.campus = adminFilterCampus;
       if (adminFilterSport)  params.sport  = adminFilterSport;
-      const [m, pb, ab, bans, slots] = await Promise.all([
+      // Same rolling 3-day window (today/tomorrow/day-after-tomorrow, IST) as
+      // the student dashboard's fetchSlots, requested explicitly per date so
+      // the admin Slots page ensures/generates slots for each date itself —
+      // it must never depend on a student having opened the dashboard first.
+      const [m, pb, ab, bans, todaySlots, tomorrowSlots, dayAfterSlots, facilityList, templates] = await Promise.all([
         getMetrics(),
         getPendingBookings(),
         getAllBookings(),
         getActiveBans(),
-        getAdminSlots(params),
+        getAdminSlots({ ...params, date: istDateKey(0) }),
+        getAdminSlots({ ...params, date: istDateKey(1) }),
+        getAdminSlots({ ...params, date: istDateKey(2) }),
+        getFacilities(),
+        getScheduleTemplates(),
       ]);
+      const adminSlotsById = new Map();
+      [...todaySlots.items, ...tomorrowSlots.items, ...dayAfterSlots.items].forEach((s) => adminSlotsById.set(s.id, s));
       setMetrics(m);
       setPendingBookings(pb);
-      setAllBookings(ab);
+      setAllBookings(ab.items);
       setActiveBans(bans);
-      setAdminSlots(slots);
+      setAdminSlots([...adminSlotsById.values()]);
+      setFacilities(facilityList);
+      setScheduleTemplates(templates);
     } catch {
       showToast('Failed to load admin data.', false);
     } finally {
@@ -189,15 +298,52 @@ export default function Dashboard() {
   }, [adminFilterCampus, adminFilterSport]);
 
   // ── Initial load ──────────────────────────────────────────────────────────
+  // Student-only data: an admin account never renders the student view (see
+  // the isStudent branch below), so fetching these for an admin was 3 dead
+  // requests on every admin mount/reload.
   useEffect(() => {
+    if (isAdmin) return;
     fetchSlots();
     fetchMyBookings();
     fetchBanStatus();
-  }, [fetchSlots, fetchMyBookings, fetchBanStatus]);
+  }, [isAdmin, fetchSlots, fetchMyBookings, fetchBanStatus]);
 
   useEffect(() => {
     if (activePortal === 'admin' && isAdmin) fetchAdminData();
   }, [activePortal, isAdmin, fetchAdminData]);
+
+  // ── Minute-level clock tick ───────────────────────────────────────────────
+  // Drives two things without ever polling the backend: (1) expired slots
+  // disappear from the student view as soon as their end time passes, and
+  // (2) the rolling 3-day window advances automatically at midnight.
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const lastCalendarDayRef = useRef(istDateKey(0));
+  useEffect(() => {
+    const currentDay = istDateKey(0);
+    if (currentDay !== lastCalendarDayRef.current) {
+      lastCalendarDayRef.current = currentDay;
+      setSelectedDayOffset(0);
+      fetchSlots();
+    }
+  }, [nowTick, fetchSlots]);
+
+  // Close the profile/mobile nav dropdowns on an outside click so they don't
+  // stay open and obscure content after the user has moved on.
+  useEffect(() => {
+    if (!profileOpen && !mobileNavOpen) return;
+    function handleOutsideClick(e) {
+      if (profileRef.current && !profileRef.current.contains(e.target)) {
+        setProfileOpen(false);
+        setMobileNavOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [profileOpen, mobileNavOpen]);
 
   // ── WebSocket live updates ────────────────────────────────────────────────
   const handleWsMessage = useCallback((msg) => {
@@ -207,10 +353,20 @@ export default function Dashboard() {
       if (activePortal === 'admin' && isAdmin) fetchAdminData();
     };
     switch (msg.type) {
+      case 'booking_created': {
+        // A join we just made locally already refreshed slots/my-bookings in
+        // handleBook; skip the duplicate here but still keep admin views live.
+        const dedupe = Date.now() - lastLocalJoinAtRef.current < 5000;
+        if (dedupe) {
+          if (activePortal === 'admin' && isAdmin) fetchAdminData();
+        } else {
+          refresh();
+        }
+        break;
+      }
       case 'slot_created':
       case 'slot_updated':
       case 'slot_cancelled':
-      case 'booking_created':
       case 'booking_cancelled':
       case 'booking_updated':
         refresh();
@@ -222,27 +378,84 @@ export default function Dashboard() {
 
   useWebSocket(handleWsMessage, true);
 
+  // ── Live occupancy updates (student portal only) ─────────────────────────
+  // Subscribes to exactly the slot IDs currently displayed, so join/leave
+  // events elsewhere update booked_count/available_count/status in place
+  // without a full slot refetch.
+  const displayedSlotIds = useMemo(() => slots.map((s) => s.id), [slots]);
+
+  const handleOccupancyUpdate = useCallback((data) => {
+    setSlots((prev) => prev.map((s) => (
+      s.id === data.slot_id
+        ? {
+            ...s,
+            booked_count:    data.booked_count ?? s.booked_count,
+            available_count: data.available_count ?? s.available_count,
+            status:          data.status ?? s.status,
+          }
+        : s
+    )));
+  }, []);
+
+  useOccupancySocket(displayedSlotIds, handleOccupancyUpdate, activePortal === 'student');
+
+  // ── Live occupancy updates (admin portal, Slots tab) ──────────────────────
+  // Subscribes to exactly the admin slot IDs currently displayed, so
+  // join/leave events elsewhere patch booked_count/available_count/status in
+  // place without a full admin data refetch.
+  const displayedAdminSlotIds = useMemo(() => adminSlots.map((s) => s.id), [adminSlots]);
+
+  const handleAdminOccupancyUpdate = useCallback((data) => {
+    setAdminSlots((prev) => prev.map((s) => (
+      s.id === data.slot_id
+        ? {
+            ...s,
+            booked_count:    data.booked_count ?? s.booked_count,
+            available_count: data.available_count ?? s.available_count,
+            status:          data.status ?? s.status,
+          }
+        : s
+    )));
+  }, []);
+
+  useOccupancySocket(
+    displayedAdminSlotIds,
+    handleAdminOccupancyUpdate,
+    activePortal === 'admin' && isAdmin,
+  );
+
   // ── Student actions ───────────────────────────────────────────────────────
   async function handleBook(slotId) {
     if (banInfo) {
       showToast(`Your booking access is suspended until ${fmtBanDate(banInfo.banned_until)}.`, false);
       return;
     }
+    // Ref-based guard closes the race between a rapid double-click and the
+    // next React render actually disabling the button.
+    if (bookingLockRef.current.has(slotId)) return;
+    bookingLockRef.current.add(slotId);
     setBookingInProgress(slotId);
     try {
       await createBooking(slotId);
       showToast('Slot booked and confirmed!');
-      fetchSlots();
-      fetchMyBookings();
+      // Mark this as a local join before refreshing so the booking_created
+      // WebSocket event for it (which may arrive mid-refresh) is deduped.
+      lastLocalJoinAtRef.current = Date.now();
+      // Refresh both together so the facility list and My Bookings settle in
+      // the same render instead of one briefly lagging behind the other.
+      await Promise.all([fetchSlots(), fetchMyBookings()]);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not book slot.', false);
     } finally {
+      bookingLockRef.current.delete(slotId);
       setBookingInProgress(null);
     }
   }
 
   async function handleCancel(bookingId) {
     if (!window.confirm('Cancel this booking? Late cancellations (< 2 hours before) incur a 2-day booking ban.')) return;
+    if (cancelLockRef.current.has(bookingId)) return;
+    cancelLockRef.current.add(bookingId);
     setCancelInProgress(bookingId);
     try {
       const result = await cancelBooking(bookingId);
@@ -252,11 +465,13 @@ export default function Dashboard() {
       } else {
         showToast('Booking cancelled.');
       }
-      fetchMyBookings();
-      fetchSlots();
+      // Refresh both together so the facility list and My Bookings settle in
+      // the same render instead of one briefly lagging behind the other.
+      await Promise.all([fetchMyBookings(), fetchSlots()]);
     } catch (err) {
       showToast(err.response?.data?.detail || 'Could not cancel booking.', false);
     } finally {
+      cancelLockRef.current.delete(bookingId);
       setCancelInProgress(null);
     }
   }
@@ -297,6 +512,107 @@ export default function Dashboard() {
     }
   }
 
+  // ── Schedule template actions ─────────────────────────────────────────────
+  function startEditTemplate(t) {
+    setEditingTemplateId(t.id);
+    setTemplateForm({
+      sport:          t.sport,
+      facility_scope: t.facility_scope,
+      facility_id:    t.facility_id || '',
+      day_type:       t.day_type,
+      priority:       t.priority ?? 0,
+      is_active:      t.is_active,
+      notes:          t.notes || '',
+      periods: (t.periods || []).map(p => ({
+        start_time: p.start_time, end_time: p.end_time, period_type: p.period_type,
+        is_bookable: p.is_bookable, label: p.label || '',
+      })),
+    });
+  }
+
+  function cancelEditTemplate() {
+    setEditingTemplateId(null);
+    setTemplateForm(BLANK_TEMPLATE);
+  }
+
+  function updatePeriodField(index, field, value) {
+    setTemplateForm(f => ({
+      ...f,
+      periods: f.periods.map((p, i) => (i === index ? { ...p, [field]: value } : p)),
+    }));
+  }
+
+  function addPeriodRow() {
+    setTemplateForm(f => ({ ...f, periods: [...f.periods, { ...BLANK_PERIOD }] }));
+  }
+
+  function removePeriodRow(index) {
+    setTemplateForm(f => ({ ...f, periods: f.periods.filter((_, i) => i !== index) }));
+  }
+
+  async function handleSubmitTemplate(e) {
+    e.preventDefault();
+    if (!templateForm.sport || !templateForm.periods.length) {
+      showToast('Sport and at least one period are required.', false);
+      return;
+    }
+    if (templateForm.facility_scope === 'facility' && !templateForm.facility_id) {
+      showToast('Select a facility for a facility-specific template.', false);
+      return;
+    }
+    setTemplateFormLoading(true);
+    try {
+      const payload = {
+        sport:          templateForm.sport,
+        facility_scope: templateForm.facility_scope,
+        facility_id:    templateForm.facility_scope === 'facility' ? templateForm.facility_id : null,
+        day_type:       templateForm.day_type,
+        priority:       Number(templateForm.priority) || 0,
+        is_active:      templateForm.is_active,
+        notes:          templateForm.notes || null,
+        periods: templateForm.periods.map(p => ({
+          start_time: p.start_time, end_time: p.end_time, period_type: p.period_type,
+          is_bookable: p.is_bookable, label: p.label || null,
+        })),
+      };
+      if (editingTemplateId) {
+        await updateScheduleTemplate(editingTemplateId, payload);
+        showToast('Schedule template updated.');
+      } else {
+        await createScheduleTemplate({ campus: 'RR', ...payload });
+        showToast('Schedule template created.');
+      }
+      cancelEditTemplate();
+      fetchAdminData();
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed to save schedule template.', false);
+    } finally {
+      setTemplateFormLoading(false);
+    }
+  }
+
+  async function handleToggleTemplateActive(t) {
+    try {
+      await updateScheduleTemplate(t.id, { is_active: !t.is_active });
+      showToast(t.is_active ? 'Template deactivated.' : 'Template activated.');
+      fetchAdminData();
+    } catch {
+      showToast('Failed to update template.', false);
+    }
+  }
+
+  async function handleDeleteTemplate(templateId) {
+    if (!window.confirm('Permanently delete this schedule template? This does not affect already-generated slots.')) return;
+    try {
+      await deleteScheduleTemplate(templateId);
+      showToast('Schedule template deleted.');
+      if (editingTemplateId === templateId) cancelEditTemplate();
+      fetchAdminData();
+    } catch {
+      showToast('Failed to delete template.', false);
+    }
+  }
+
   async function handleAdminCancelBooking(bookingId) {
     if (!window.confirm('Force-cancel this student\'s booking?')) return;
     try {
@@ -319,18 +635,50 @@ export default function Dashboard() {
     }
   }
 
+  async function handleViewRoster(slotId) {
+    setRosterSlotId(slotId);
+    setRosterData(null);
+    setRosterError(null);
+    setRosterLoading(true);
+    try {
+      const data = await getSlotRoster(slotId);
+      setRosterData(data);
+    } catch (err) {
+      setRosterError(err.response?.data?.detail || 'Failed to load slot roster.');
+    } finally {
+      setRosterLoading(false);
+    }
+  }
+
+  function closeRoster() {
+    setRosterSlotId(null);
+    setRosterData(null);
+    setRosterError(null);
+    setRosterLoading(false);
+  }
+
+  useEffect(() => {
+    if (!rosterSlotId) return;
+    function handleEscape(e) {
+      if (e.key === 'Escape') closeRoster();
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [rosterSlotId]);
+
   async function handleCreateSlot(e) {
     e.preventDefault();
-    if (!slotForm.date || !slotForm.start_time || !slotForm.end_time || !slotForm.venue || !slotForm.capacity) {
+    if (!slotForm.facility_id || !slotForm.date || !slotForm.start_time || !slotForm.end_time) {
       showToast('Please fill in all fields.', false);
       return;
     }
     setSlotFormLoading(true);
     try {
       const payload = {
-        ...slotForm,
-        capacity: parseInt(slotForm.capacity, 10),
-        date: new Date(slotForm.date).toISOString(),
+        facility_id: slotForm.facility_id,
+        start_time:  slotForm.start_time,
+        end_time:    slotForm.end_time,
+        date:        new Date(slotForm.date).toISOString(),
       };
       await createSlot(payload);
       showToast('Slot created!');
@@ -345,21 +693,32 @@ export default function Dashboard() {
 
   function startEditSlot(slot) {
     setEditingSlot(slot.id);
-    setEditForm({
-      sport:      slot.sport,
-      venue:      slot.venue,
-      campus:     slot.campus,
-      capacity:   slot.capacity,
-      start_time: slot.start_time,
-      end_time:   slot.end_time,
-      date:       fmtDate(slot.date),
-    });
+    if (slot.is_manual) {
+      setEditForm({
+        facility_id: slot.facility_id || '',
+        start_time:  slot.start_time,
+        end_time:    slot.end_time,
+        date:        fmtDate(slot.date),
+      });
+    } else {
+      setEditForm({
+        sport:      slot.sport,
+        venue:      slot.venue,
+        campus:     slot.campus,
+        capacity:   slot.capacity,
+        start_time: slot.start_time,
+        end_time:   slot.end_time,
+        date:       fmtDate(slot.date),
+      });
+    }
   }
 
-  async function handleSaveEdit(slotId) {
+  async function handleSaveEdit(slotId, isManual) {
     setEditLoading(true);
     try {
-      const payload = { ...editForm, capacity: parseInt(editForm.capacity, 10) };
+      const payload = isManual
+        ? { facility_id: editForm.facility_id, start_time: editForm.start_time, end_time: editForm.end_time }
+        : { ...editForm, capacity: parseInt(editForm.capacity, 10) };
       if (editForm.date) payload.date = new Date(editForm.date).toISOString();
       await updateSlot(slotId, payload);
       showToast('Slot updated!');
@@ -373,19 +732,89 @@ export default function Dashboard() {
   }
 
   // ── Derived data ──────────────────────────────────────────────────────────
-  const slotsBySport = slots.reduce((acc, s) => {
-    if (!acc[s.sport]) acc[s.sport] = [];
-    acc[s.sport].push(s);
-    return acc;
-  }, {});
+  // The rolling 3-day window: today / tomorrow / day after tomorrow. Recomputed
+  // whenever the minute-tick fires so it always reflects the real calendar day.
+  const rollingDates = useMemo(
+    () => [0, 1, 2].map((offset) => istCalendarDate(offset)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nowTick]
+  );
+  const selectedDateKey = isoDateOnly(rollingDates[selectedDayOffset]);
 
-  const displayedSports = filterSport
-    ? SPORTS_LIST.filter(s => s === filterSport)
-    : SPORTS_LIST;
+  // A slot whose end time has passed must disappear from the student view
+  // even while the page stays open — the backend is authoritative (it also
+  // rejects joins for expired slots), this is purely a client-side mirror of
+  // that rule, recomputed on every minute-tick. Slot times are IST wall-clock
+  // (RR campus business hours), so they're resolved to a real UTC instant
+  // before comparing against "now".
+  const nowDate = new Date(nowTick);
+  function isSlotExpired(slot) {
+    return slotTimeToUtcInstant(slot.date, slot.end_time).getTime() <= nowDate.getTime();
+  }
+
+  const slotsForSelectedDay = slots.filter(
+    (s) => isoDateOnly(s.date) === selectedDateKey && !isSlotExpired(s)
+  );
+
+  // Sport filter options come from whatever the backend actually returned for
+  // the selected day — never a hardcoded sport list. RR only for now.
+  const availableSports = [...new Set(slotsForSelectedDay.map(s => s.sport))].sort();
+
+  const visibleSlots = filterSport
+    ? slotsForSelectedDay.filter(s => s.sport === filterSport)
+    : slotsForSelectedDay;
+
+  // Group by individual facility (not just by sport) using facility_id from
+  // the facility-aware API response, falling back to facility_name for any
+  // legacy/manual slot that predates facility linkage.
+  const facilityGroups = Object.values(
+    visibleSlots.reduce((acc, s) => {
+      const key = s.facility_id || `${s.sport}::${s.facility_name || s.venue}`;
+      if (!acc[key]) {
+        acc[key] = {
+          key,
+          facilityName: s.facility_name || s.venue || 'Unknown facility',
+          sport: s.sport,
+          slots: [],
+        };
+      }
+      acc[key].slots.push(s);
+      return acc;
+    }, {})
+  ).map(group => ({
+    ...group,
+    slots: group.slots.slice().sort((a, b) => {
+      const dateCmp = new Date(a.date) - new Date(b.date);
+      if (dateCmp !== 0) return dateCmp;
+      return a.start_time.localeCompare(b.start_time);
+    }),
+  })).sort((a, b) => a.facilityName.localeCompare(b.facilityName));
+
+  // `is_past` is computed server-side at fetch time, so without a fresh
+  // fetch it goes stale as the clock moves past a slot's end time while the
+  // page stays open. Recompute it from the booking's own slot_date/
+  // slot_end_time against the live nowTick (same IST resolution as
+  // isSlotExpired above) so a booking moves from active to History on its
+  // own, without a refetch — falling back to the server's is_past when the
+  // slot fields aren't present (e.g. slot since deleted).
+  function isBookingPast(b) {
+    if (!b.slot_date || !b.slot_end_time) return b.is_past;
+    return slotTimeToUtcInstant(b.slot_date, b.slot_end_time).getTime() <= nowDate.getTime();
+  }
+  const activeBookings = myBookings.filter(b => b.status !== 'cancelled' && !isBookingPast(b));
+  const historyBookings = myBookings.filter(b => b.status === 'cancelled' || isBookingPast(b));
+  // Derived purely from existing state (myBookings) — not a new backend
+  // rule — so slot cards can show "Joined" instead of "Join" for slots the
+  // student already has an active participation in.
+  const joinedSlotIds = new Set(activeBookings.map(b => b.slot_id));
+  const todayKey = istDateKey(0);
+  const todaysActiveCount = activeBookings.filter(
+    b => b.slot_date && isoDateOnly(b.slot_date) === todayKey
+  ).length;
 
   const metricCards = metrics
     ? [
-        { label: 'Active slots',       value: metrics.slots.open + metrics.slots.full },
+        { label: 'Active slots',       value: metrics.slots.active ?? (metrics.slots.open + metrics.slots.full) },
         { label: 'Occupancy',          value: `${metrics.occupancy_pct}%` },
         { label: 'Total bookings',     value: metrics.bookings.total },
         { label: 'Confirmed bookings', value: metrics.bookings.confirmed },
@@ -396,552 +825,1091 @@ export default function Dashboard() {
 
   const isStudent = activePortal === 'student';
 
+  if (shouldRedirectToAdmin) {
+    return <Navigate to="/admin" replace />;
+  }
+
   async function handleLogout() {
     await logout();
     navigate('/login');
   }
 
-  // ── Input style helper ────────────────────────────────────────────────────
-  const inp = {
-    width: '100%',
-    border: '1px solid rgba(167,139,250,0.22)',
-    borderRadius: '16px',
-    background: 'rgba(7,10,20,0.92)',
-    padding: '12px 16px',
-    color: '#f8fafc',
-    fontSize: '0.9rem',
-    boxSizing: 'border-box',
-  };
-
-  return (
-    <main className="dashboard">
-      {/* Toast */}
-      {toast && (
-        <div className={`toast ${toast.ok ? 'toast-ok' : 'toast-err'}`}>{toast.msg}</div>
-      )}
-
-      {/* ── Topbar ── */}
-      <header className="topbar">
-        <div>
-          <p className="brand-kicker">PESU Sports Slot Booking</p>
-          <h1 className="brand-title">Campus Arena</h1>
-        </div>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
-          {/* Admins only see the Admin Panel label; students only see Student Portal */}
-          <div className="portal-switch" role="tablist">
-            {!isAdmin && (
-              <button className="switch-chip active" type="button" disabled>
-                Student Portal
-              </button>
-            )}
-            {isAdmin && (
-              <button className="switch-chip active" type="button" disabled>
-                Admin Panel
-              </button>
-            )}
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <p style={{ margin: 0, color: '#f5f3ff', fontWeight: 700, fontSize: '0.9rem' }}>
-              {user?.name || user?.srn}
-            </p>
-            <button onClick={handleLogout} style={{ background: 'none', border: 'none', color: '#8dd8ff', cursor: 'pointer', fontSize: '0.82rem', padding: 0 }}>
-              Sign out
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* ── Hero ── */}
-      <section className="hero-panel">
-        <div
-          className="hero-copy hero-media"
-          style={{ backgroundImage: 'linear-gradient(135deg, rgba(5,8,20,0.84), rgba(93,63,211,0.48)), url("/images/football-hero.jpg")' }}
-        >
-          <p className="eyebrow">{isStudent ? 'Student Sports Access' : 'Admin Control'}</p>
-          <h2 className="hero-title">
-            {isStudent
-              ? 'Reserve college sports slots and manage bookings in one place.'
-              : 'Create, update, and monitor campus sports slots in real time.'}
-          </h2>
-          <div className="hero-stats">
-            <div><strong>{metrics?.slots.open ?? slots.length}</strong><span>Available slots</span></div>
-            <div>
-              <strong>{isStudent ? myBookings.filter(b => b.status !== 'cancelled').length : (metrics ? `${metrics.occupancy_pct}%` : '—')}</strong>
-              <span>{isStudent ? 'My active bookings' : 'Occupancy'}</span>
+  if (isStudent) {
+    return (
+      <div className="sd-shell">
+        {/* ── Top navigation (full-bleed, sticky + blurred like the v0 reference) ── */}
+        <header className="sd-nav">
+          <div className="sd-nav-inner">
+            <div className="sd-brand">
+              <img src="/pesu-compass-mark.webp" alt="PES University" className="sd-brand-mark" />
+              <div className="sd-brand-text">
+                <strong>SPORTS HUB</strong>
+              </div>
             </div>
-            <div><strong>Live</strong><span>Real-time updates</span></div>
+            <nav className="sd-nav-links">
+              <a href="#discover">Discover</a>
+              <a href="#my-bookings">My bookings</a>
+              <button type="button" onClick={() => showToast('For help with bookings, contact your sports coordinator.')}>
+                Help
+              </button>
+            </nav>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                className="sd-nav-toggle"
+                type="button"
+                aria-label={mobileNavOpen ? 'Close menu' : 'Open menu'}
+                aria-expanded={mobileNavOpen}
+                onClick={() => setMobileNavOpen(o => !o)}
+              >
+                ☰
+              </button>
+              <div className="sd-profile" ref={profileRef}>
+                <button
+                  className="sd-profile-trigger"
+                  type="button"
+                  aria-haspopup="true"
+                  aria-expanded={profileOpen}
+                  onClick={() => setProfileOpen(o => !o)}
+                >
+                  <span className="sd-avatar">{initials(user?.name, user?.srn)}</span>
+                  <span className="sd-profile-name">
+                    <strong>{user?.name || user?.srn}</strong>
+                    <span>{user?.srn}</span>
+                  </span>
+                  <span aria-hidden="true" style={{ color: 'var(--sd-muted)' }}>▾</span>
+                </button>
+                {profileOpen && (
+                  <div className="sd-profile-menu">
+                    <button type="button" onClick={handleLogout}>Sign out</button>
+                  </div>
+                )}
+                {mobileNavOpen && (
+                  <div className="sd-mobile-menu">
+                    <a href="#discover" onClick={() => setMobileNavOpen(false)}>Discover</a>
+                    <a href="#my-bookings" onClick={() => setMobileNavOpen(false)}>My bookings</a>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileNavOpen(false);
+                        showToast('For help with bookings, contact your sports coordinator.');
+                      }}
+                    >
+                      Help
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
-        <div
-          className="hero-highlight hero-media"
-          style={{ backgroundImage: 'linear-gradient(180deg, rgba(12,14,30,0.3), rgba(12,14,30,0.88)), url("/images/pesu-campus.jpg")' }}
-        >
-          <span className="highlight-label">{isStudent ? 'Your session' : 'Operations snapshot'}</span>
-          <h2>
-            {isStudent
-              ? `Welcome back, ${user?.name?.split(' ')[0] || user?.srn}.`
-              : 'Slot management and live occupancy tracking.'}
-          </h2>
-          <p style={{ color: '#cbd5ff' }}>
-            {isStudent
-              ? `${user?.branch ? user.branch + ' · ' : ''}${user?.campus ? user.campus + ' Campus' : ''}`
-              : `${activeBans.length} active ban${activeBans.length !== 1 ? 's' : ''} · ${metrics?.bookings.total ?? 0} total bookings`}
-          </p>
-        </div>
-      </section>
+        </header>
 
-      {/* ══ STUDENT PORTAL ══════════════════════════════════════════════════ */}
-      {isStudent && (
-        <>
-          {/* Ban Banner */}
+        <div className="sd-inner">
+          {/* ── Hero ── */}
+          <section className="sd-hero">
+            <div>
+              <span className="sd-eyebrow-chip">🏅 Open courts, better days</span>
+              <h1 className="sd-hero-title">
+                Find your next <em>game.</em>
+              </h1>
+              <p className="sd-hero-sub">
+                Reserve a spot, join fellow students, and make the most of RR campus.
+                {user?.name ? ` Welcome back, ${user.name.split(' ')[0]}.` : ''}
+              </p>
+            </div>
+            <div className="sd-hero-card">
+              <div className="sd-hero-card-icon">📅</div>
+              <div className="sd-hero-card-body">
+                <div>
+                  <p className="sd-hero-card-label">Today</p>
+                  <p className="sd-hero-card-value">
+                    {new Date().toLocaleDateString('en-IN', { weekday: 'long', timeZone: 'Asia/Kolkata' })}, {formatDateDMY(istCalendarDate(0))}
+                  </p>
+                </div>
+                <div>
+                  <p className="sd-hero-card-label">Daily limit</p>
+                  <p className="sd-hero-card-value">{todaysActiveCount}/{MAX_ACTIVE_SLOTS_PER_DAY} slots</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {toast && (
+            <div className={`sd-notice ${toast.ok ? 'sd-notice-ok' : 'sd-notice-err'}`} role="status">
+              <span>{toast.ok ? '✓' : '⚠️'} {toast.msg}</span>
+              <button className="sd-notice-dismiss" type="button" aria-label="Dismiss notification" onClick={() => setToast(null)}>✕</button>
+            </div>
+          )}
+
           {banInfo && (
-            <div style={{
-              background: 'rgba(192,57,43,0.18)', border: '1px solid #c0392b',
-              borderRadius: '16px', padding: '16px 20px', margin: '0 0 24px',
-              color: '#ff7c7c',
-            }}>
+            <div className="sd-ban-banner">
               ⚠️ <strong>Booking suspended</strong> until{' '}
               <strong>{fmtBanDate(banInfo.banned_until)}</strong> — {banInfo.reason}
             </div>
           )}
 
-          {/* Filters */}
-          <section style={{ marginBottom: '24px', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <p className="eyebrow" style={{ margin: 0, marginRight: '4px' }}>Filter:</p>
-            <select style={{ ...inp, width: 'auto', padding: '10px 16px' }} value={filterCampus} onChange={e => setFilterCampus(e.target.value)}>
-              <option value="">All Campuses</option>
-              {CAMPUSES.map(c => <option key={c} value={c}>{c} Campus</option>)}
-            </select>
-            <select style={{ ...inp, width: 'auto', padding: '10px 16px' }} value={filterSport} onChange={e => setFilterSport(e.target.value)}>
-              <option value="">All Sports</option>
-              {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-            {(filterCampus || filterSport) && (
-              <button className="secondary-button" type="button" style={{ padding: '10px 16px' }} onClick={() => { setFilterCampus(''); setFilterSport(''); }}>
-                Clear
-              </button>
-            )}
-          </section>
-
-          {/* Sports Cards */}
-          <section className="sports-section">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Available Sports</p>
-                <h2>View and book slots by sport</h2>
+          {/* ── Main layout: facility discovery + my bookings sidebar ── */}
+          <div className="sd-layout">
+            <div id="discover">
+              <div className="sd-section-head">
+                <p className="sd-section-eyebrow">Explore facilities</p>
+                <h2 className="sd-section-title">Pick a sport, pick a slot</h2>
+                <p className="sd-section-meta">📍 PES University, RR Campus</p>
               </div>
-              <p className="section-copy">Live slot counts. Auto-confirmed on booking.</p>
-            </div>
 
-            {slotsLoading ? (
-              <p style={{ color: '#cbd5ff', textAlign: 'center', padding: '40px 0' }}>Loading slots…</p>
-            ) : (
-              <div className="sports-grid">
-                {displayedSports.map((sportName) => {
-                  const sportSlots  = slotsBySport[sportName] || [];
-                  const totalAvail  = sportSlots.reduce((s, sl) => s + sl.available_count, 0);
-                  const meta        = SPORT_META[sportName] || { image: '', accent: '' };
-                  const nextSlot    = sportSlots[0];
+              <div className="sd-chip-row" role="tablist" aria-label="Select day">
+                {rollingDates.map((d, i) => {
+                  const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : 'Day after tomorrow';
                   return (
-                    <article className="sport-card" key={sportName}>
-                      <div className="sport-image-wrap">
-                        <img className="sport-image" src={meta.image} alt={sportName} />
-                        <span className="sport-badge">
-                          {totalAvail > 0 ? `${totalAvail} seats available` : 'No slots today'}
-                        </span>
-                      </div>
-                      <div className="sport-content">
-                        <div className="sport-header">
-                          <div>
-                            <h3>{sportName}</h3>
-                            <p className="venue">{nextSlot?.venue || '—'}</p>
-                          </div>
-                          {nextSlot && <span className="slot-pill">{nextSlot.start_time}–{nextSlot.end_time}</span>}
-                        </div>
-                        <p className="sport-accent">{meta.accent}</p>
-                        {sportSlots.length > 0 ? (
-                          <div style={{ display: 'grid', gap: '8px' }}>
-                            {sportSlots.slice(0, 3).map((sl) => (
-                              <button
-                                key={sl.id}
-                                className="primary-button"
-                                type="button"
-                                disabled={!!banInfo || bookingInProgress === sl.id || sl.available_count === 0}
-                                onClick={() => handleBook(sl.id)}
-                                style={{ fontSize: '0.9rem', padding: '11px 14px' }}
-                              >
-                                {bookingInProgress === sl.id
-                                  ? 'Booking…'
-                                  : `Book — ${sl.start_time}–${sl.end_time} (${sl.available_count} left)`}
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <button className="secondary-button" type="button" disabled>No slots available</button>
-                        )}
-                      </div>
-                    </article>
+                    <button
+                      key={i}
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedDayOffset === i}
+                      className={`sd-chip ${selectedDayOffset === i ? 'active' : ''}`}
+                      onClick={() => setSelectedDayOffset(i)}
+                    >
+                      {label} — {formatDateDMY(d)}
+                    </button>
                   );
                 })}
               </div>
-            )}
-          </section>
 
-          {/* My Bookings + Announcements */}
-          <section className="content-grid">
-            <article className="panel">
-              <div className="panel-header">
-                <p className="eyebrow">My Bookings</p>
-                <h3>Manage upcoming reservations</h3>
+              <div className="sd-chip-row">
+                <button
+                  type="button"
+                  className={`sd-chip ${!filterSport ? 'active' : ''}`}
+                  onClick={() => setFilterSport('')}
+                >
+                  All sports
+                </button>
+                {availableSports.map(s => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`sd-chip ${filterSport === s ? 'active' : ''}`}
+                    onClick={() => setFilterSport(s)}
+                  >
+                    {s}
+                  </button>
+                ))}
               </div>
-              {bookingsLoading ? (
-                <p style={{ color: '#cbd5ff' }}>Loading…</p>
-              ) : myBookings.filter(b => b.status !== 'cancelled').length === 0 ? (
-                <p style={{ color: '#cbd5ff' }}>No active bookings yet. Book a slot above!</p>
+
+              {slotsLoading ? (
+                <p className="sd-empty">Loading slots…</p>
+              ) : slotsError ? (
+                <p className="sd-empty">
+                  {slotsError}{' '}
+                  <button type="button" className="sd-chip" onClick={fetchSlots}>Retry</button>
+                </p>
+              ) : facilityGroups.length === 0 ? (
+                <p className="sd-empty">No slots available right now.</p>
               ) : (
-                <div className="booking-list">
-                  {myBookings.filter(b => b.status !== 'cancelled').map((bk) => (
-                    <div className="booking-row" key={bk.id}>
-                      <div>
-                        <strong>{bk.sport}</strong>
-                        <p>{bk.slot_date ? fmtDate(bk.slot_date) : '—'}{bk.slot_start_time ? `, ${bk.slot_start_time}–${bk.slot_end_time}` : ''}</p>
-                        <span>{bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}</span>
-                      </div>
-                      <div className="booking-actions">
-                        <span className="status-chip">{fmtStatus(bk.status)}</span>
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={cancelInProgress === bk.id}
-                          onClick={() => handleCancel(bk.id)}
+                <div className="sd-facility-grid">
+                  {facilityGroups.map((group) => {
+                    const openSlots = group.slots.filter(
+                      sl => sl.status !== 'full' && sl.available_count > 0
+                    ).length;
+                    return (
+                      <article className="sd-facility-card" key={group.key}>
+                        <div
+                          className="sd-facility-image"
+                          style={{ backgroundImage: `url("${SPORT_IMAGES[group.sport] || DEFAULT_FACILITY_IMAGE}")` }}
                         >
-                          {cancelInProgress === bk.id ? 'Cancelling…' : 'Cancel'}
+                          <span className="sd-facility-tag">{group.sport}</span>
+                          <p className="sd-facility-name">{group.facilityName}</p>
+                        </div>
+                        <div className="sd-facility-body">
+                          <p className="sd-facility-location">📍 RR Campus</p>
+                          {group.slots.length > 0 ? (
+                            <div className="sd-slot-list">
+                              {group.slots.map((sl) => {
+                                const isJoined = joinedSlotIds.has(sl.id);
+                                const isFull = !isJoined && (sl.status === 'full' || sl.available_count === 0);
+                                return (
+                                  <div className={`sd-slot-row ${isJoined ? 'sd-slot-row-joined' : ''}`} key={sl.id}>
+                                    <div>
+                                      <p className="sd-slot-time">🕒 {sl.start_time} – {sl.end_time}</p>
+                                      <p className="sd-slot-meta">{sl.booked_count}/{sl.capacity} joined</p>
+                                    </div>
+                                    {isJoined ? (
+                                      <span className="sd-joined-pill">✓ Joined</span>
+                                    ) : isFull ? (
+                                      <span className="sd-full-pill">Full</span>
+                                    ) : (
+                                      <button
+                                        className="sd-join-btn"
+                                        type="button"
+                                        disabled={!!banInfo || bookingInProgress === sl.id}
+                                        onClick={() => handleBook(sl.id)}
+                                      >
+                                        {bookingInProgress === sl.id ? 'Joining…' : '+ Join'}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="sd-empty">No slots available</p>
+                          )}
+                          <div className="sd-facility-footer">
+                            {openSlots > 0 ? (
+                              <span className="sd-availability-ok">{openSlots} slot{openSlots !== 1 ? 's' : ''} available</span>
+                            ) : (
+                              <span className="sd-availability-none">No slots available</span>
+                            )}
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* ── My bookings sidebar ── */}
+            <aside className="sd-sidebar" id="my-bookings">
+              <div className="sd-card">
+                <div className="sd-card-head">
+                  <div>
+                    <p className="sd-section-eyebrow">Your schedule</p>
+                    <h3 className="sd-section-title" style={{ fontSize: '1.15rem' }}>My bookings</h3>
+                  </div>
+                </div>
+
+                {bookingsLoading ? (
+                  <p className="sd-empty">Loading…</p>
+                ) : bookingsError ? (
+                  <p className="sd-empty">
+                    {bookingsError}{' '}
+                    <button type="button" className="sd-chip" onClick={fetchMyBookings}>Retry</button>
+                  </p>
+                ) : activeBookings.length === 0 ? (
+                  <p className="sd-empty">No active bookings yet. Join a slot to get started!</p>
+                ) : (
+                  <div className="sd-booking-list">
+                    {activeBookings.map((bk) => (
+                      <div className="sd-booking-item" key={bk.id}>
+                        <div className="sd-booking-item-head">
+                          <span className="sd-booking-sport">
+                            <span className="sd-dot" />
+                            {bk.sport}
+                            {bk.is_leader && <span className="sd-leader-badge">Leader</span>}
+                          </span>
+                        </div>
+                        <p className="sd-booking-meta">
+                          🕒 {bk.slot_date ? formatDateDMY(bk.slot_date) : '—'}
+                          {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
+                        </p>
+                        <p className="sd-booking-meta">
+                          📍 {bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}
+                        </p>
+                        <div className="sd-booking-footer">
+                          <span className="sd-status-confirmed">✓ {fmtStatus(bk.status)}</span>
+                          <div className="sd-booking-footer-right">
+                            <span className="sd-booking-id">#{bk.id.slice(-4)}</span>
+                            <button
+                              className="sd-leave-btn"
+                              type="button"
+                              disabled={cancelInProgress === bk.id}
+                              onClick={() => handleCancel(bk.id)}
+                            >
+                              {cancelInProgress === bk.id ? 'Leaving…' : (<>↪ Leave slot</>)}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="sd-note-box">
+                  <span>ℹ️</span>
+                  <span>
+                    You can join up to {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day. Leave a slot early if your plans change.
+                  </span>
+                </div>
+              </div>
+
+              {/* ── History (past + cancelled bookings) ── */}
+              <div className="sd-card">
+                <div className="sd-card-head">
+                  <div>
+                    <p className="sd-section-eyebrow">Past activity</p>
+                    <h3 className="sd-section-title" style={{ fontSize: '1.15rem' }}>History</h3>
+                  </div>
+                </div>
+
+                {bookingsLoading ? (
+                  <p className="sd-empty">Loading…</p>
+                ) : historyBookings.length === 0 ? (
+                  <p className="sd-empty">No past bookings yet.</p>
+                ) : (
+                  <div className="sd-booking-list">
+                    {historyBookings.map((bk) => (
+                      <div className="sd-booking-item" key={bk.id}>
+                        <div className="sd-booking-item-head">
+                          <span className="sd-booking-sport">
+                            <span className="sd-dot" />
+                            {bk.sport}
+                          </span>
+                        </div>
+                        <p className="sd-booking-meta">
+                          🕒 {bk.slot_date ? formatDateDMY(bk.slot_date) : '—'}
+                          {bk.slot_start_time ? ` · ${bk.slot_start_time}–${bk.slot_end_time}` : ''}
+                        </p>
+                        <p className="sd-booking-meta">
+                          📍 {bk.slot_venue || '—'}{bk.slot_campus ? ` · ${bk.slot_campus}` : ''}
+                        </p>
+                        <div className="sd-booking-footer">
+                          <span className={bk.status === 'cancelled' ? 'sd-status-cancelled' : 'sd-status-confirmed'}>
+                            {bk.status === 'cancelled' ? '✕' : '✓'} {fmtStatus(bk.status)}
+                          </span>
+                          <span className="sd-booking-id">#{bk.id.slice(-4)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </aside>
+          </div>
+
+          {/* ── Announcements / events (existing content, restyled) ── */}
+          <div className="sd-extras">
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <h3 className="sd-section-title" style={{ fontSize: '1.05rem' }}>Announcements</h3>
+              </div>
+              <ul>{announcements.map(a => <li key={a}>{a}</li>)}</ul>
+            </div>
+            <div className="sd-card">
+              <div className="sd-card-head">
+                <h3 className="sd-section-title" style={{ fontSize: '1.05rem' }}>Upcoming events</h3>
+              </div>
+              {upcomingEvents.map(ev => (
+                <div className="sd-event-row" key={ev.title}>
+                  <strong>{ev.title}</strong>
+                  <span>{ev.time}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <footer className="sd-footer">
+            <span>Built for better campus days.</span>
+            <a href="#discover" style={{ color: 'inherit', textDecoration: 'none' }}>Back to top ↑</a>
+          </footer>
+        </div>
+      </div>
+    );
+  }
+
+  const ADMIN_TABS = [
+    { id: 'overview',   label: 'Dashboard',   count: null },
+    { id: 'facilities', label: 'Facilities',  count: facilities.length },
+    { id: 'schedule',   label: 'Schedule',     count: scheduleTemplates.length },
+    { id: 'slots',      label: 'Slots',       count: adminSlots.length },
+    { id: 'bookings',   label: 'Bookings',    count: allBookings.length },
+    { id: 'bans',       label: 'Bans',        count: activeBans.length },
+  ];
+  const ADMIN_TABS_SOON = ['Users / Students'];
+
+  const slotStatusPill = (status) => {
+    if (status === 'open') return <span className="ad-pill ad-pill-open">{fmtStatus(status)}</span>;
+    if (status === 'full') return <span className="ad-pill ad-pill-full">{fmtStatus(status)}</span>;
+    return <span className="ad-pill ad-pill-neutral">{fmtStatus(status)}</span>;
+  };
+
+  return (
+    <div className="ad-shell">
+      {toast && (
+        <div className={`sd-toast ${toast.ok ? 'sd-toast-ok' : 'sd-toast-err'}`}>{toast.msg}</div>
+      )}
+
+      {/* ── Sidebar navigation ── */}
+      <aside className="ad-sidebar">
+        <div className="ad-sidebar-brand">
+          <img src="/pesu-compass-mark.webp" alt="PES University" className="ad-sidebar-logo" />
+          <div className="ad-sidebar-brand-text">
+            <strong>PESU SPORTS</strong>
+            <span>Operations</span>
+          </div>
+        </div>
+
+        <p className="ad-nav-label">Workspace</p>
+        <nav className="ad-nav-list">
+          {ADMIN_TABS.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`ad-nav-item ${adminTab === tab.id ? 'active' : ''}`}
+              onClick={() => setAdminTab(tab.id)}
+            >
+              {tab.label}
+              {tab.count !== null && <span className="ad-nav-count">{tab.count}</span>}
+            </button>
+          ))}
+          {ADMIN_TABS_SOON.map(label => (
+            <button key={label} type="button" className="ad-nav-item" disabled>
+              {label}
+              <span className="ad-nav-soon">Soon</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="ad-sidebar-footer">
+          <div className="ad-sidebar-user">
+            <span className="sd-avatar">{initials(user?.name, user?.srn)}</span>
+            <div>
+              <p className="ad-sidebar-user-name" style={{ margin: 0 }}>{user?.name || user?.srn}</p>
+              <p className="ad-sidebar-user-role" style={{ margin: 0 }}>{user?.role || 'Admin'}</p>
+            </div>
+          </div>
+          <button className="ad-sidebar-signout" type="button" onClick={handleLogout}>Sign out</button>
+        </div>
+      </aside>
+
+      {/* ── Main content ── */}
+      <main className="ad-main">
+        <div className="ad-topbar">
+          <div>
+            <p className="ad-topbar-eyebrow">Admin Console</p>
+            <h1 className="ad-topbar-title">Sports operations · RR Campus</h1>
+          </div>
+          <button className="ad-refresh-btn" type="button" onClick={fetchAdminData} disabled={adminLoading}>
+            {adminLoading ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+        </div>
+
+        {/* ── Dashboard (Overview) ── */}
+        {adminTab === 'overview' && (
+          <>
+            <div className="ad-metric-grid">
+              {metricCards.map(m => (
+                <div className="ad-metric-card" key={m.label}>
+                  <p className="ad-metric-label">{m.label}</p>
+                  <p className="ad-metric-value">{m.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">Create slot</p>
+                <h2 className="ad-card-title">Add new availability</h2>
+              </div>
+              <form className="ad-form-grid" onSubmit={handleCreateSlot}>
+                <label style={{ gridColumn: '1/-1' }}>
+                  <span>Facility</span>
+                  <select
+                    className="ad-input"
+                    value={slotForm.facility_id}
+                    onChange={e => setSlotForm(f => ({ ...f, facility_id: e.target.value }))}
+                  >
+                    <option value="">Select a facility…</option>
+                    {facilities.filter(f => f.is_active).map(f => (
+                      <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                    ))}
+                  </select>
+                </label>
+                {(() => {
+                  const selectedFacility = facilities.find(f => f.id === slotForm.facility_id);
+                  return selectedFacility ? (
+                    <p className="ad-row-sub" style={{ gridColumn: '1/-1', margin: '-6px 0 0' }}>
+                      {selectedFacility.sport} · capacity {selectedFacility.capacity}
+                    </p>
+                  ) : null;
+                })()}
+                <label><span>Date</span><input className="ad-input" type="date" value={slotForm.date} onChange={e => setSlotForm(f => ({ ...f, date: e.target.value }))} /></label>
+                <label><span>Start time</span><input className="ad-input" type="time" value={slotForm.start_time} onChange={e => setSlotForm(f => ({ ...f, start_time: e.target.value }))} /></label>
+                <label><span>End time</span><input className="ad-input" type="time" value={slotForm.end_time} onChange={e => setSlotForm(f => ({ ...f, end_time: e.target.value }))} /></label>
+                <div className="ad-btn-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
+                  <button className="ad-btn-primary" type="submit" disabled={slotFormLoading}>
+                    {slotFormLoading ? 'Creating…' : 'Create slot'}
+                  </button>
+                  <button className="ad-btn-secondary" type="button" onClick={() => setSlotForm(BLANK_SLOT)}>Reset</button>
+                </div>
+              </form>
+            </div>
+          </>
+        )}
+
+        {/* ── Facilities ── */}
+        {adminTab === 'facilities' && (
+          <div className="ad-card">
+            <div className="ad-card-head">
+              <p className="ad-card-eyebrow">RR campus inventory</p>
+              <h2 className="ad-card-title">Facilities</h2>
+            </div>
+
+            {adminLoading ? (
+              <p className="ad-empty">Loading facilities…</p>
+            ) : facilities.length === 0 ? (
+              <p className="ad-empty">No facilities found.</p>
+            ) : (
+              <div className="ad-row-list">
+                {facilities.map(f => (
+                  <div className="ad-row" key={f.id}>
+                    <div className="ad-row-main">
+                      <strong>{f.display_name || f.name}</strong>
+                      <p className="ad-row-sub">{f.sport}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong>{fmtStatus(f.facility_type)}</strong>
+                      <p className="ad-row-sub">{f.name}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong>{f.capacity}</strong>
+                      <p className="ad-row-sub">capacity</p>
+                    </div>
+                    {f.is_active ? (
+                      <span className="ad-pill ad-pill-open">Active</span>
+                    ) : (
+                      <span className="ad-pill ad-pill-neutral">Inactive</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Schedule ── */}
+        {adminTab === 'schedule' && (
+          <>
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">{editingTemplateId ? 'Editing template' : 'New template'}</p>
+                <h2 className="ad-card-title">{editingTemplateId ? 'Edit schedule template' : 'Create schedule template'}</h2>
+              </div>
+              <form className="ad-form-grid" onSubmit={handleSubmitTemplate}>
+                <label>
+                  <span>Sport</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.sport}
+                    onChange={e => setTemplateForm(f => ({ ...f, sport: e.target.value }))}
+                  >
+                    <option value="">Select a sport…</option>
+                    {[...new Set(facilities.map(f => f.sport))].map(sport => (
+                      <option key={sport} value={sport}>{sport}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Scope</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.facility_scope}
+                    onChange={e => setTemplateForm(f => ({ ...f, facility_scope: e.target.value, facility_id: '' }))}
+                  >
+                    <option value="sport">Sport-level</option>
+                    <option value="facility">Facility-specific</option>
+                  </select>
+                </label>
+                {templateForm.facility_scope === 'facility' && (
+                  <label style={{ gridColumn: '1/-1' }}>
+                    <span>Facility</span>
+                    <select
+                      className="ad-input"
+                      value={templateForm.facility_id}
+                      onChange={e => setTemplateForm(f => ({ ...f, facility_id: e.target.value }))}
+                    >
+                      <option value="">Select a facility…</option>
+                      {facilities
+                        .filter(f => !templateForm.sport || f.sport === templateForm.sport)
+                        .map(f => (
+                          <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                        ))}
+                    </select>
+                  </label>
+                )}
+                <label>
+                  <span>Day type</span>
+                  <select
+                    className="ad-input"
+                    value={templateForm.day_type}
+                    onChange={e => setTemplateForm(f => ({ ...f, day_type: e.target.value }))}
+                  >
+                    <option value="weekday">Weekday</option>
+                    <option value="saturday">Saturday</option>
+                    <option value="sunday">Sunday</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Priority</span>
+                  <input
+                    className="ad-input" type="number"
+                    value={templateForm.priority}
+                    onChange={e => setTemplateForm(f => ({ ...f, priority: e.target.value }))}
+                  />
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', flexDirection: 'row' }}>
+                  <input
+                    type="checkbox"
+                    checked={templateForm.is_active}
+                    onChange={e => setTemplateForm(f => ({ ...f, is_active: e.target.checked }))}
+                  />
+                  <span>Active</span>
+                </label>
+                <label style={{ gridColumn: '1/-1' }}>
+                  <span>Notes</span>
+                  <input
+                    className="ad-input"
+                    value={templateForm.notes}
+                    onChange={e => setTemplateForm(f => ({ ...f, notes: e.target.value }))}
+                  />
+                </label>
+
+                <div style={{ gridColumn: '1/-1', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <span>Periods</span>
+                  {templateForm.periods.map((p, i) => (
+                    <div key={i} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <input className="ad-input" type="time" style={{ width: '110px' }}
+                        value={p.start_time} onChange={e => updatePeriodField(i, 'start_time', e.target.value)} />
+                      <input className="ad-input" type="time" style={{ width: '110px' }}
+                        value={p.end_time} onChange={e => updatePeriodField(i, 'end_time', e.target.value)} />
+                      <select className="ad-input" style={{ width: '130px' }}
+                        value={p.period_type} onChange={e => updatePeriodField(i, 'period_type', e.target.value)}>
+                        <option value="student">Student</option>
+                        <option value="staff">Staff</option>
+                        <option value="cleaning">Cleaning</option>
+                        <option value="lunch">Lunch</option>
+                      </select>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', flexDirection: 'row' }}>
+                        <input type="checkbox" checked={p.is_bookable}
+                          onChange={e => updatePeriodField(i, 'is_bookable', e.target.checked)} />
+                        <span style={{ fontSize: '13px' }}>Bookable</span>
+                      </label>
+                      <input className="ad-input" placeholder="Label" style={{ width: '140px' }}
+                        value={p.label} onChange={e => updatePeriodField(i, 'label', e.target.value)} />
+                      <button type="button" className="ad-btn-secondary" onClick={() => removePeriodRow(i)}
+                        disabled={templateForm.periods.length <= 1}>Remove</button>
+                    </div>
+                  ))}
+                  <button type="button" className="ad-btn-secondary" style={{ alignSelf: 'flex-start' }} onClick={addPeriodRow}>
+                    + Add period
+                  </button>
+                </div>
+
+                <div className="ad-btn-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
+                  <button className="ad-btn-primary" type="submit" disabled={templateFormLoading}>
+                    {templateFormLoading ? 'Saving…' : editingTemplateId ? 'Save changes' : 'Create template'}
+                  </button>
+                  <button className="ad-btn-secondary" type="button" onClick={cancelEditTemplate}>
+                    {editingTemplateId ? 'Cancel edit' : 'Reset'}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">RR campus templates</p>
+                <h2 className="ad-card-title">Schedule</h2>
+              </div>
+
+              {adminLoading ? (
+                <p className="ad-empty">Loading schedule templates…</p>
+              ) : scheduleTemplates.length === 0 ? (
+                <p className="ad-empty">No schedule templates found.</p>
+              ) : (
+                <div className="ad-row-list">
+                  {scheduleTemplates.map(t => (
+                    <div className="ad-row" key={t.id} style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                        <div className="ad-row-main">
+                          <strong>{t.facility_name || t.sport}</strong>
+                          <p className="ad-row-sub">
+                            {t.sport} · {t.facility_scope === 'facility' ? 'Facility-specific' : 'Sport-level'} · {fmtStatus(t.day_type)} · priority {t.priority}
+                          </p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          {t.is_active ? (
+                            <span className="ad-pill ad-pill-open">Active</span>
+                          ) : (
+                            <span className="ad-pill ad-pill-neutral">Inactive</span>
+                          )}
+                          <button className="ad-btn-secondary" type="button" onClick={() => startEditTemplate(t)}>Edit</button>
+                          <button className="ad-btn-secondary" type="button" onClick={() => handleToggleTemplateActive(t)}>
+                            {t.is_active ? 'Deactivate' : 'Activate'}
+                          </button>
+                          <button className="ad-btn-danger" type="button" onClick={() => handleDeleteTemplate(t.id)}>Delete</button>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {(t.periods || []).map((p, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', fontSize: '13px' }}>
+                            <span>{p.start_time}–{p.end_time}{p.label ? ` · ${p.label}` : ''}</span>
+                            <span style={{ display: 'flex', gap: '8px' }}>
+                              <span className="ad-row-sub">{fmtStatus(p.period_type)}</span>
+                              {p.is_bookable ? (
+                                <span className="ad-pill ad-pill-open">Bookable</span>
+                              ) : (
+                                <span className="ad-pill ad-pill-neutral">Non-bookable</span>
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── Slots ── */}
+        {adminTab === 'slots' && (
+          <div className="ad-card">
+            <div className="ad-card-head" style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div>
+                <p className="ad-card-eyebrow">Slots &amp; bookings</p>
+                <h2 className="ad-card-title">Edit or cancel existing slots</h2>
+              </div>
+              <div className="ad-filters">
+                <select className="ad-input" style={{ width: 'auto' }} value={adminFilterCampus} onChange={e => setAdminFilterCampus(e.target.value)}>
+                  <option value="">All Campuses</option>
+                  {CAMPUSES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <select className="ad-input" style={{ width: 'auto' }} value={adminFilterSport} onChange={e => setAdminFilterSport(e.target.value)}>
+                  <option value="">All Sports</option>
+                  {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {(() => {
+              // Hide deprecated sports that no longer exist in the college
+              const DEPRECATED = ['Swimming', 'Tennis'];
+              const visibleSlots = adminSlots.filter(sl => !DEPRECATED.includes(sl.sport));
+              if (visibleSlots.length === 0) return <p className="ad-empty">No slots found.</p>;
+              return (
+                <div className="ad-row-list">
+                  {visibleSlots.map(sl => (
+                    <div key={sl.id}>
+                      {editingSlot === sl.id ? (
+                        <div className="ad-row" style={{ alignItems: 'flex-start' }}>
+                          <div className="ad-edit-grid">
+                            {sl.is_manual ? (
+                              <>
+                                <label style={{ gridColumn: '1/-1' }}>
+                                  <span>Facility</span>
+                                  <select
+                                    className="ad-input"
+                                    value={editForm.facility_id}
+                                    onChange={e => setEditForm(f => ({ ...f, facility_id: e.target.value }))}
+                                  >
+                                    <option value="">Select a facility…</option>
+                                    {facilities.filter(f => f.is_active).map(f => (
+                                      <option key={f.id} value={f.id}>{f.display_name} ({f.sport})</option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <label>
+                                  <span>Date</span>
+                                  <input className="ad-input" type="date" value={editForm.date} onChange={e => setEditForm(f => ({ ...f, date: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Start</span>
+                                  <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>End</span>
+                                  <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
+                                </label>
+                              </>
+                            ) : (
+                              <>
+                                <label>
+                                  <span>Venue</span>
+                                  <input className="ad-input" value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Capacity</span>
+                                  <input className="ad-input" type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>Start</span>
+                                  <input className="ad-input" type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
+                                </label>
+                                <label>
+                                  <span>End</span>
+                                  <input className="ad-input" type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
+                                </label>
+                              </>
+                            )}
+                          </div>
+                          <div className="ad-btn-row" style={{ alignSelf: 'flex-end' }}>
+                            <button className="ad-btn-primary ad-btn-sm" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id, sl.is_manual)}>
+                              {editLoading ? '…' : 'Save'}
+                            </button>
+                            <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => setEditingSlot(null)}>Discard</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="ad-row">
+                          <div className="ad-row-main">
+                            <strong>{sl.sport}</strong>
+                            <p className="ad-row-sub">{sl.campus} · {sl.venue}</p>
+                          </div>
+                          <div className="ad-row-main">
+                            <strong>{formatDateDMY(sl.date)}</strong>
+                            <p className="ad-row-sub">{sl.start_time}–{sl.end_time}</p>
+                          </div>
+                          <div className="ad-occupancy">
+                            <p className="ad-occupancy-label">{sl.booked_count}/{sl.capacity} booked</p>
+                            <div className="ad-occupancy-bar">
+                              <div
+                                className="ad-occupancy-fill"
+                                style={{ width: `${sl.capacity ? Math.min(100, (sl.booked_count / sl.capacity) * 100) : 0}%` }}
+                              />
+                            </div>
+                          </div>
+                          {slotStatusPill(sl.status)}
+                          <div className="ad-btn-row">
+                            <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => handleViewRoster(sl.id)}>Roster</button>
+                            {sl.status !== 'cancelled' && (
+                              <button className="ad-btn-primary ad-btn-sm" type="button" onClick={() => startEditSlot(sl)}>Edit</button>
+                            )}
+                            {sl.status !== 'cancelled' && (
+                              <button className="ad-btn-secondary ad-btn-sm" type="button" onClick={() => handleCancelSlot(sl.id)}>Cancel</button>
+                            )}
+                            <button className="ad-btn-danger ad-btn-sm" type="button" onClick={() => handleDeleteSlot(sl.id)}>Delete</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ── Bookings ── */}
+        {adminTab === 'bookings' && (
+          <>
+            {pendingBookings.length > 0 && (
+              <div className="ad-card">
+                <div className="ad-card-head">
+                  <p className="ad-card-eyebrow">Pending approvals</p>
+                  <h2 className="ad-card-title">{pendingBookings.length} awaiting action</h2>
+                </div>
+                <div className="ad-row-list">
+                  {pendingBookings.map(bk => (
+                    <div className="ad-row" key={bk.id}>
+                      <div className="ad-row-main">
+                        <strong>{bk.user?.name || '—'}</strong>
+                        <p className="ad-row-sub">{bk.user?.srn}</p>
+                      </div>
+                      <div className="ad-row-main">
+                        <strong>{bk.sport}</strong>
+                        <p className="ad-row-sub">{bk.slot ? `${formatDateDMY(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p>
+                      </div>
+                      <span className="ad-pill ad-pill-neutral">Pending</span>
+                      <div className="ad-btn-row">
+                        <button className="ad-btn-primary ad-btn-sm" type="button" disabled={approvalInProgress === bk.id + 'approve'} onClick={() => handleApproval(bk.id, 'approve')}>
+                          {approvalInProgress === bk.id + 'approve' ? '…' : 'Approve'}
+                        </button>
+                        <button className="ad-btn-secondary ad-btn-sm" type="button" disabled={approvalInProgress === bk.id + 'reject'} onClick={() => handleApproval(bk.id, 'reject')}>
+                          {approvalInProgress === bk.id + 'reject' ? '…' : 'Reject'}
                         </button>
                       </div>
                     </div>
                   ))}
                 </div>
-              )}
-            </article>
-
-            <article className="panel stacked-panel">
-              <div>
-                <div className="panel-header">
-                  <p className="eyebrow">Announcements</p>
-                  <h3>Notice board</h3>
-                </div>
-                <ul className="info-list">{announcements.map(a => <li key={a}>{a}</li>)}</ul>
               </div>
-              <div>
-                <div className="panel-header section-gap">
-                  <p className="eyebrow">Upcoming Events</p>
-                  <h3>Campus sports calendar</h3>
-                </div>
-                <div className="event-list">
-                  {upcomingEvents.map(ev => (
-                    <div className="event-row" key={ev.title}>
-                      <strong>{ev.title}</strong>
-                      <span>{ev.time}</span>
-                    </div>
-                  ))}
-                </div>
+            )}
+
+            <div className="ad-card">
+              <div className="ad-card-head">
+                <p className="ad-card-eyebrow">All bookings</p>
+                <h2 className="ad-card-title">Complete booking history</h2>
               </div>
-            </article>
-          </section>
-        </>
-      )}
-
-      {/* ══ ADMIN PORTAL ════════════════════════════════════════════════════ */}
-      {!isStudent && isAdmin && (
-        <>
-          {/* Admin Tab Nav */}
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '24px', flexWrap: 'wrap' }}>
-            {[
-              { id: 'overview',  label: 'Overview' },
-              { id: 'slots',     label: `Manage Slots (${adminSlots.length})` },
-              { id: 'bookings',  label: `All Bookings (${allBookings.length})` },
-              { id: 'bans',      label: `Bans (${activeBans.length})` },
-            ].map(tab => (
-              <button
-                key={tab.id}
-                className={adminTab === tab.id ? 'switch-chip active' : 'switch-chip'}
-                type="button"
-                onClick={() => setAdminTab(tab.id)}
-              >
-                {tab.label}
-              </button>
-            ))}
-            <button className="secondary-button" type="button" onClick={fetchAdminData} disabled={adminLoading} style={{ marginLeft: 'auto', padding: '8px 18px', fontSize: '0.85rem' }}>
-              {adminLoading ? 'Refreshing…' : '↻ Refresh'}
-            </button>
-          </div>
-
-          {/* ── Overview Tab ── */}
-          {adminTab === 'overview' && (
-            <section className="content-grid admin-grid" style={{ marginBottom: '24px' }}>
-              {/* Metrics */}
-              <article className="panel">
-                <div className="panel-header">
-                  <p className="eyebrow">Live Metrics</p>
-                  <h3>Operations pulse</h3>
-                </div>
-                <div className="mini-grid">
-                  {metricCards.map(m => (
-                    <div className="mini-stat" key={m.label}>
-                      <strong>{m.value}</strong>
-                      <span>{m.label}</span>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              {/* Create Slot */}
-              <article className="panel">
-                <div className="panel-header">
-                  <p className="eyebrow">Create Slot</p>
-                  <h3>Add new availability</h3>
-                </div>
-                <form className="form-grid" onSubmit={handleCreateSlot}>
-                  <label>
-                    <span>Sport</span>
-                    <select style={inp} value={slotForm.sport} onChange={e => setSlotForm(f => ({ ...f, sport: e.target.value }))}>
-                      {SPORTS_LIST.map(s => <option key={s}>{s}</option>)}
-                    </select>
-                  </label>
-                  <label>
-                    <span>Campus</span>
-                    <select style={inp} value={slotForm.campus} onChange={e => setSlotForm(f => ({ ...f, campus: e.target.value }))}>
-                      {CAMPUSES.map(c => <option key={c}>{c}</option>)}
-                    </select>
-                  </label>
-                  <label><span>Date</span><input style={inp} type="date" value={slotForm.date} onChange={e => setSlotForm(f => ({ ...f, date: e.target.value }))} /></label>
-                  <label><span>Venue</span><input style={inp} type="text" placeholder="e.g. Main Turf Arena" value={slotForm.venue} onChange={e => setSlotForm(f => ({ ...f, venue: e.target.value }))} /></label>
-                  <label><span>Start time</span><input style={inp} type="time" value={slotForm.start_time} onChange={e => setSlotForm(f => ({ ...f, start_time: e.target.value }))} /></label>
-                  <label><span>End time</span><input style={inp} type="time" value={slotForm.end_time} onChange={e => setSlotForm(f => ({ ...f, end_time: e.target.value }))} /></label>
-                  <label><span>Max seats</span><input style={inp} type="number" min="1" placeholder="20" value={slotForm.capacity} onChange={e => setSlotForm(f => ({ ...f, capacity: e.target.value }))} /></label>
-                  <div className="button-row" style={{ gridColumn: '1/-1', marginTop: '4px' }}>
-                    <button className="primary-button" type="submit" disabled={slotFormLoading}>
-                      {slotFormLoading ? 'Creating…' : 'Create slot'}
-                    </button>
-                    <button className="secondary-button" type="button" onClick={() => setSlotForm(BLANK_SLOT)}>Reset</button>
-                  </div>
-                </form>
-              </article>
-            </section>
-          )}
-
-          {/* ── Slots Tab ── */}
-          {adminTab === 'slots' && (
-            <section className="panel bookings-panel" style={{ marginBottom: '24px' }}>
-              <div className="section-heading booking-heading">
-                <div>
-                  <p className="eyebrow">Manage Slots</p>
-                  <h2>Edit or cancel existing slots</h2>
-                </div>
-                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                  <select style={{ ...inp, width: 'auto', padding: '9px 14px' }} value={adminFilterCampus} onChange={e => setAdminFilterCampus(e.target.value)}>
-                    <option value="">All Campuses</option>
-                    {CAMPUSES.map(c => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                  <select style={{ ...inp, width: 'auto', padding: '9px 14px' }} value={adminFilterSport} onChange={e => setAdminFilterSport(e.target.value)}>
-                    <option value="">All Sports</option>
-                    {SPORTS_LIST.map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-              </div>
-
-              {(() => {
-                // Hide deprecated sports that no longer exist in the college
-                const DEPRECATED = ['Swimming', 'Tennis'];
-                const visibleSlots = adminSlots.filter(sl => !DEPRECATED.includes(sl.sport));
-                if (visibleSlots.length === 0) return <p style={{ color: '#cbd5ff' }}>No slots found.</p>;
-                return (
-                  <div className="admin-booking-list">
-                    {visibleSlots.map(sl => (
-                      <div key={sl.id}>
-                        {editingSlot === sl.id ? (
-                          <div className="admin-booking-row" style={{ flexWrap: 'wrap', gap: '12px', alignItems: 'flex-start' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', flex: '1 1 400px' }}>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Venue</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} value={editForm.venue} onChange={e => setEditForm(f => ({ ...f, venue: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Capacity</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="number" min="1" value={editForm.capacity} onChange={e => setEditForm(f => ({ ...f, capacity: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>Start</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="time" value={editForm.start_time} onChange={e => setEditForm(f => ({ ...f, start_time: e.target.value }))} />
-                              </label>
-                              <label style={{ fontSize: '0.82rem' }}>
-                                <span style={{ color: '#8899cc' }}>End</span>
-                                <input style={{ ...inp, padding: '8px 12px', marginTop: '4px' }} type="time" value={editForm.end_time} onChange={e => setEditForm(f => ({ ...f, end_time: e.target.value }))} />
-                              </label>
-                            </div>
-                            <div className="button-row compact" style={{ alignSelf: 'flex-end' }}>
-                              <button className="primary-button compact-button" type="button" disabled={editLoading} onClick={() => handleSaveEdit(sl.id)}>
-                                {editLoading ? '…' : 'Save'}
-                              </button>
-                              <button className="secondary-button compact-button" type="button" onClick={() => setEditingSlot(null)}>Discard</button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="admin-booking-row">
-                            <div>
-                              <strong>{sl.sport}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{sl.campus} · {sl.venue}</p>
-                            </div>
-                            <div>
-                              <strong>{fmtDate(sl.date)}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{sl.start_time}–{sl.end_time}</p>
-                            </div>
-                            <div>
-                              <strong>{sl.booked_count}/{sl.capacity}</strong>
-                              <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>booked</p>
-                            </div>
-                            <span className="status-chip" style={{
-                              background: sl.status === 'open' ? 'rgba(34,197,94,0.15)' : sl.status === 'full' ? 'rgba(245,158,11,0.15)' : 'rgba(239,68,68,0.15)',
-                              color: sl.status === 'open' ? '#4ade80' : sl.status === 'full' ? '#fbbf24' : '#f87171',
-                            }}>
-                              {fmtStatus(sl.status)}
-                            </span>
-                            <div className="button-row compact">
-                              {sl.status !== 'cancelled' && (
-                                <button className="primary-button compact-button" type="button" onClick={() => startEditSlot(sl)}>Edit</button>
-                              )}
-                              {sl.status !== 'cancelled' && (
-                                <button className="secondary-button compact-button" type="button" onClick={() => handleCancelSlot(sl.id)}>Cancel</button>
-                              )}
-                              <button
-                                className="secondary-button compact-button"
-                                type="button"
-                                style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)' }}
-                                onClick={() => handleDeleteSlot(sl.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </section>
-          )}
-
-          {/* ── Bookings Tab ── */}
-          {adminTab === 'bookings' && (
-            <>
-              {/* Pending */}
-              {pendingBookings.length > 0 && (
-                <section className="panel bookings-panel" style={{ marginBottom: '24px' }}>
-                  <div className="section-heading booking-heading">
-                    <div>
-                      <p className="eyebrow">Pending Approvals</p>
-                      <h2>Approve or reject requests</h2>
-                    </div>
-                    <p className="section-copy">{pendingBookings.length} awaiting action.</p>
-                  </div>
-                  <div className="admin-booking-list">
-                    {pendingBookings.map(bk => (
-                      <div className="admin-booking-row" key={bk.id}>
-                        <div><strong>{bk.user?.name || '—'}</strong><p>{bk.user?.srn}</p></div>
-                        <div><strong>{bk.sport}</strong><p>{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time}` : '—'}</p></div>
-                        <span className="status-chip">Pending</span>
-                        <div className="button-row compact">
-                          <button className="primary-button compact-button" type="button" disabled={approvalInProgress === bk.id + 'approve'} onClick={() => handleApproval(bk.id, 'approve')}>
-                            {approvalInProgress === bk.id + 'approve' ? '…' : 'Approve'}
-                          </button>
-                          <button className="secondary-button compact-button" type="button" disabled={approvalInProgress === bk.id + 'reject'} onClick={() => handleApproval(bk.id, 'reject')}>
-                            {approvalInProgress === bk.id + 'reject' ? '…' : 'Reject'}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* All bookings */}
-              <section className="panel bookings-panel">
-                <div className="section-heading booking-heading">
-                  <div>
-                    <p className="eyebrow">All Bookings</p>
-                    <h2>Complete booking history</h2>
-                  </div>
-                </div>
-                {allBookings.length === 0 ? (
-                  <p style={{ color: '#cbd5ff' }}>No bookings yet.</p>
-                ) : (
-                  <div className="admin-booking-list">
-                    {allBookings.map(bk => (
-                      <div className="admin-booking-row" key={bk.id}>
-                        <div><strong>{bk.user?.name || '—'}</strong><p>{bk.user?.srn}</p></div>
-                        <div>
-                          <strong>{bk.sport}</strong>
-                          <p>{bk.slot ? `${fmtDate(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
-                        </div>
-                        <span className="status-chip">{fmtStatus(bk.status)}</span>
-                        <span style={{ color: '#8899cc', fontSize: '0.8rem' }}>{fmt(bk.created_at)}</span>
-                        {bk.status !== 'cancelled' && (
-                          <button
-                            className="secondary-button compact-button"
-                            type="button"
-                            style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)', fontSize: '0.8rem', padding: '6px 14px' }}
-                            onClick={() => handleAdminCancelBooking(bk.id)}
-                          >
-                            Cancel
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </>
-          )}
-
-          {/* ── Bans Tab ── */}
-          {adminTab === 'bans' && (
-            <section className="panel bookings-panel">
-              <div className="section-heading booking-heading">
-                <div>
-                  <p className="eyebrow">Active Bans</p>
-                  <h2>Students with booking suspensions</h2>
-                </div>
-                <p className="section-copy">Bans are applied automatically on late cancellations.</p>
-              </div>
-              {activeBans.length === 0 ? (
-                <p style={{ color: '#cbd5ff' }}>No active bans.</p>
+              {allBookings.length === 0 ? (
+                <p className="ad-empty">No bookings yet.</p>
               ) : (
-                <div className="admin-booking-list">
-                  {activeBans.map(b => (
-                    <div className="admin-booking-row" key={b.id}>
-                      <div>
-                        <strong>{b.user_name || '—'}</strong>
-                        <p style={{ color: '#8899cc' }}>{b.user_srn} · {b.user_email}</p>
+                <div className="ad-row-list">
+                  {allBookings.map(bk => (
+                    <div className="ad-row" key={bk.id}>
+                      <div className="ad-row-main">
+                        <strong>{bk.user?.name || '—'}</strong>
+                        <p className="ad-row-sub">{bk.user?.srn}</p>
                       </div>
-                      <div>
-                        <strong style={{ color: '#ff7c7c' }}>Banned until</strong>
-                        <p>{fmtBanDate(b.banned_until)}</p>
+                      <div className="ad-row-main">
+                        <strong>{bk.sport}</strong>
+                        <p className="ad-row-sub">{bk.slot ? `${formatDateDMY(bk.slot.date)}, ${bk.slot.start_time}–${bk.slot.end_time} · ${bk.slot.campus}` : '—'}</p>
                       </div>
-                      <div style={{ flex: 1 }}>
-                        <p style={{ color: '#8899cc', fontSize: '0.82rem' }}>{b.reason}</p>
-                      </div>
-                      <button className="primary-button compact-button" type="button" onClick={() => handleUnban(b.user_id)}>
-                        Lift Ban
-                      </button>
+                      <span className="ad-pill ad-pill-neutral">{fmtStatus(bk.status)}</span>
+                      <span className="ad-row-sub">{fmt(bk.created_at)}</span>
+                      {bk.status !== 'cancelled' && (
+                        <button className="ad-btn-danger ad-btn-sm" type="button" onClick={() => handleAdminCancelBooking(bk.id)}>
+                          Cancel
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
               )}
-            </section>
-          )}
-        </>
+            </div>
+          </>
+        )}
+
+        {/* ── Bans ── */}
+        {adminTab === 'bans' && (
+          <div className="ad-card">
+            <div className="ad-card-head">
+              <p className="ad-card-eyebrow">Active bans</p>
+              <h2 className="ad-card-title">Students with booking suspensions</h2>
+            </div>
+            {activeBans.length === 0 ? (
+              <p className="ad-empty">No active bans.</p>
+            ) : (
+              <div className="ad-row-list">
+                {activeBans.map(b => (
+                  <div className="ad-row" key={b.id}>
+                    <div className="ad-row-main">
+                      <strong>{b.user_name || '—'}</strong>
+                      <p className="ad-row-sub">{b.user_srn} · {b.user_email}</p>
+                    </div>
+                    <div className="ad-row-main">
+                      <strong style={{ color: 'var(--sd-accent)' }}>Banned until</strong>
+                      <p className="ad-row-sub">{fmtBanDate(b.banned_until)}</p>
+                    </div>
+                    <p className="ad-row-sub" style={{ flex: 1 }}>{b.reason}</p>
+                    <button className="ad-btn-primary ad-btn-sm" type="button" onClick={() => handleUnban(b.user_id)}>
+                      Lift ban
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* ── Slot roster modal (accountability view, admin-only) ── */}
+      {rosterSlotId && (
+        <div className="ad-modal-overlay" onClick={closeRoster}>
+          <div
+            className="ad-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="roster-modal-title"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="ad-modal-header">
+              <div>
+                <p className="ad-card-eyebrow">Slot roster</p>
+                <h2 className="ad-card-title" id="roster-modal-title">Occupancy &amp; accountability</h2>
+              </div>
+              <button className="ad-modal-close" type="button" aria-label="Close slot roster" onClick={closeRoster}>✕ Close</button>
+            </div>
+
+            {rosterLoading ? (
+              <p className="ad-empty">Loading roster…</p>
+            ) : rosterError ? (
+              <p className="ad-empty" style={{ color: 'var(--sd-accent)' }}>{rosterError}</p>
+            ) : rosterData ? (
+              (() => {
+                const { slot, participants } = rosterData;
+                const active = participants.filter(p => p.status !== 'cancelled');
+                const cancelled = participants.filter(p => p.status === 'cancelled');
+                const leader = active.find(p => p.is_leader);
+                return (
+                  <>
+                    <div className="ad-roster-summary">
+                      <div>
+                        <p className="ad-roster-summary-label">Sport</p>
+                        <p className="ad-roster-summary-value">{slot.sport}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Facility</p>
+                        <p className="ad-roster-summary-value">{slot.facility_name || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Date / time</p>
+                        <p className="ad-roster-summary-value">{formatDateDMY(slot.date)}, {slot.start_time}–{slot.end_time}</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Occupancy</p>
+                        <p className="ad-roster-summary-value">{slot.booked_count}/{slot.capacity} booked</p>
+                      </div>
+                      <div>
+                        <p className="ad-roster-summary-label">Leader</p>
+                        <p className="ad-roster-summary-value">{leader?.user_snapshot?.name || leader?.user_snapshot?.srn || '—'}</p>
+                      </div>
+                    </div>
+
+                    <div className="ad-roster-section">
+                      <p className="ad-roster-section-title">Active participants ({active.length})</p>
+                      {active.length === 0 ? (
+                        <p className="ad-empty">No one has joined this slot yet.</p>
+                      ) : (
+                        <div className="ad-roster-list">
+                          {active.map(p => (
+                            <div className="ad-roster-participant" key={p.booking_id}>
+                              <div className="ad-roster-participant-head">
+                                <span className="ad-roster-participant-name">
+                                  {p.user_snapshot?.name || '—'}
+                                  {p.is_leader && <span className="ad-pill ad-pill-open">Leader</span>}
+                                </span>
+                                <span className="ad-roster-summary-label" style={{ margin: 0 }}>
+                                  Joined {fmt(p.joined_at)}
+                                </span>
+                              </div>
+                              <div className="ad-roster-detail-grid">
+                                <span><strong>SRN:</strong> {p.user_snapshot?.srn || '—'}</span>
+                                <span><strong>Phone:</strong> {p.user_snapshot?.phone || '—'}</span>
+                                <span><strong>Branch:</strong> {p.user_snapshot?.branch || '—'}</span>
+                                <span><strong>Program:</strong> {p.user_snapshot?.program || '—'}</span>
+                                <span><strong>Semester:</strong> {p.user_snapshot?.semester || '—'}</span>
+                                <span><strong>Section:</strong> {p.user_snapshot?.section || '—'}</span>
+                                <span><strong>Campus:</strong> {p.user_snapshot?.campus || '—'}</span>
+                                <span><strong>Status:</strong> {fmtStatus(p.status)}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="ad-roster-section">
+                      <p className="ad-roster-section-title">Historical / cancelled ({cancelled.length})</p>
+                      {cancelled.length === 0 ? (
+                        <p className="ad-empty">No cancellations recorded for this slot.</p>
+                      ) : (
+                        <div className="ad-roster-list">
+                          {cancelled.map(p => (
+                            <div className="ad-roster-participant cancelled" key={p.booking_id}>
+                              <div className="ad-roster-participant-head">
+                                <span className="ad-roster-participant-name">{p.user_snapshot?.name || '—'}</span>
+                                <span className="ad-roster-summary-label" style={{ margin: 0 }}>
+                                  Joined {fmt(p.joined_at)}
+                                </span>
+                              </div>
+                              <div className="ad-roster-detail-grid">
+                                <span><strong>SRN:</strong> {p.user_snapshot?.srn || '—'}</span>
+                                <span><strong>Branch:</strong> {p.user_snapshot?.branch || '—'}</span>
+                                <span><strong>Campus:</strong> {p.user_snapshot?.campus || '—'}</span>
+                                <span><strong>Cancelled:</strong> {fmt(p.cancelled_at)}</span>
+                                <span><strong>Cancelled by:</strong> {p.cancelled_by ? `#${p.cancelled_by.slice(-4)}` : '—'}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()
+            ) : null}
+          </div>
+        </div>
       )}
-    </main>
+    </div>
   );
 }

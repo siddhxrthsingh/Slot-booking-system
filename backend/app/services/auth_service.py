@@ -2,6 +2,7 @@
 Auth service: PESUAuth integration, admin login, JWT generation, session management.
 """
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,14 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+def _mask_srn(srn: str | None) -> str:
+    """Mask an SRN for diagnostic logs, e.g. PES1UG25AM400 -> PES1***M400."""
+    if not srn or len(srn) < 9:
+        return "***"
+    return f"{srn[:4]}***{srn[-4:]}"
 
 
 # ---------------------------------------------------------------------------
@@ -20,8 +29,8 @@ settings = get_settings()
 # ---------------------------------------------------------------------------
 
 def is_admin_employee_id(username: str) -> bool:
-    """True when the username matches the configured admin employee ID."""
-    return username.upper() == settings.admin_employee_id.upper()
+    """True when the username matches one of the configured admin employee IDs."""
+    return username.upper() in settings.admin_employee_id_set
 
 
 async def verify_admin_credentials(username: str, password: str) -> dict | None:
@@ -34,7 +43,7 @@ async def verify_admin_credentials(username: str, password: str) -> dict | None:
     if password != settings.admin_password:
         return None
     return {
-        "employee_id": settings.admin_employee_id.upper(),
+        "employee_id": username.upper(),
         "name":        settings.admin_name,
         "email":       settings.admin_email,
         "role":        "admin",
@@ -100,6 +109,29 @@ def _hash_token(token: str) -> str:
 # campus_code returned by PESUAuth: 1 = RR, 2 = EC
 _CAMPUS_CODE_MAP = {1: "RR", 2: "EC"}
 
+# PESUAuth may return the full campus name; map (casefolded) to our codes.
+_CAMPUS_NAME_MAP = {
+    "rr": "RR",
+    "ec": "EC",
+    "pes university (ring road)": "RR",
+    "pes university (electronic city)": "EC",
+}
+
+
+def normalize_campus(value: str | None) -> str | None:
+    """
+    Map an external PESUAuth campus value to a canonical code ("RR"/"EC").
+    Returns None when no campus was provided. Raises ValueError for an
+    unrecognised value rather than guessing.
+    """
+    if value is None or not str(value).strip():
+        return None
+    key = " ".join(str(value).split()).casefold()
+    code = _CAMPUS_NAME_MAP.get(key)
+    if code is None:
+        raise ValueError(f"Unsupported PESUAuth campus value: {value!r}")
+    return code
+
 
 async def verify_pesu_credentials(username: str, password: str) -> dict | None:
     """
@@ -122,23 +154,58 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
             return None
 
         if response.status_code != 200:
+            logger.error(
+                "PESUAuth returned unexpected status code: %s",
+                response.status_code,
+            )
             raise httpx.RequestError(
                 f"PESUAuth returned unexpected status {response.status_code}"
             )
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.error(
+                "PESUAuth response JSON parsing failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            raise
         if not data.get("status"):
             return None
 
         raw = data.get("profile") or {}
 
+        # TEMP DIAGNOSTIC (missing-phone investigation): log field presence and
+        # types only. Never log values.
+        logger.info(
+            "PESUAuth phone diagnostic srn=%s profile_keys=%s "
+            "phone_present=%s phone_type=%s phone_non_empty=%s "
+            "phone_number_present=%s phone_number_type=%s phone_number_non_empty=%s",
+            _mask_srn(raw.get("srn") or raw.get("prn")),
+            sorted(raw.keys()),
+            "phone" in raw,
+            type(raw["phone"]).__name__ if "phone" in raw else None,
+            bool(raw.get("phone")),
+            "phone_number" in raw,
+            type(raw["phone_number"]).__name__ if "phone_number" in raw else None,
+            bool(raw.get("phone_number")),
+        )
+
         # campus field is "RR"/"EC" string; fall back to campus_code int if missing.
-        campus = raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
+        campus = normalize_campus(
+            raw.get("campus") or _CAMPUS_CODE_MAP.get(raw.get("campus_code"))
+        )
 
         return {
             "srn":      raw.get("srn") or raw.get("prn") or username.upper(),
             "name":     raw.get("name", ""),
             "email":    raw.get("email", ""),
+            # "phone" is the authoritative PESUAuth profile field (confirmed
+            # against the API docs/live response); "phone_number" is kept
+            # only as a harmless fallback in case a differently-shaped
+            # response is ever returned.
+            "phone":    raw.get("phone") or raw.get("phone_number"),
             "program":  raw.get("program"),
             "branch":   raw.get("branch"),
             "campus":   campus,
@@ -146,7 +213,12 @@ async def verify_pesu_credentials(username: str, password: str) -> dict | None:
             "section":  raw.get("section"),
         }
 
-    except httpx.RequestError:
+    except httpx.RequestError as exc:
+        logger.error(
+            "PESUAuth request failed: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         # Dev-only bypass: lets you test locally without hitting the real API.
         # Disabled automatically when APP_ENV=production.
         if settings.app_env == "development":
@@ -160,6 +232,7 @@ def _mock_pesu_profile(username: str) -> dict:
         "srn":      username.upper(),
         "email":    f"{username.lower()}@pesu.pes.edu",
         "name":     "Dev User (mock)",
+        "phone":    "9999999999",
         "program":  "Bachelor of Technology",
         "branch":   "Computer Science and Engineering",
         "campus":   "RR",
@@ -179,19 +252,26 @@ async def upsert_user(db: AsyncIOMotorDatabase, profile: dict) -> dict:
     if not srn:
         raise ValueError("PESUAuth did not return an SRN for this user.")
 
+    set_fields = {
+        "email":      profile.get("email", ""),
+        "name":       profile.get("name", ""),
+        "program":    profile.get("program"),
+        "branch":     profile.get("branch"),
+        "campus":     profile.get("campus"),
+        "semester":   profile.get("semester"),
+        "section":    profile.get("section"),
+        "last_login": now,
+    }
+    # Only overwrite phone when the auth provider actually returned one, so a
+    # login response that omits it never blanks out a previously captured
+    # phone number.
+    if profile.get("phone"):
+        set_fields["phone"] = profile["phone"]
+
     result = await db["users"].find_one_and_update(
         {"srn": srn},
         {
-            "$set": {
-                "email":      profile.get("email", ""),
-                "name":       profile.get("name", ""),
-                "program":    profile.get("program"),
-                "branch":     profile.get("branch"),
-                "campus":     profile.get("campus"),
-                "semester":   profile.get("semester"),
-                "section":    profile.get("section"),
-                "last_login": now,
-            },
+            "$set": set_fields,
             "$setOnInsert": {
                 "srn":        srn,
                 "role":       "student",
@@ -200,6 +280,16 @@ async def upsert_user(db: AsyncIOMotorDatabase, profile: dict) -> dict:
         },
         upsert=True,
         return_document=True,
+    )
+
+    # TEMP DIAGNOSTIC (missing-phone investigation)
+    logger.info(
+        "upsert_user phone diagnostic srn=%s phone_in_update=%s "
+        "update_returned_doc=%s phone_stored_in_db=%s",
+        _mask_srn(srn),
+        "phone" in set_fields,
+        result is not None,
+        bool(result and result.get("phone")),
     )
     return result
 

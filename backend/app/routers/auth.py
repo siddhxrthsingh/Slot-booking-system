@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -14,6 +16,7 @@ from app.services import auth_service
 from app.utils import error_response, success_response
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/login")
@@ -32,7 +35,12 @@ async def login(
         # 1b. Verify student credentials against PESUAuth
         try:
             profile = await auth_service.verify_pesu_credentials(body.username, body.password)
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "PESUAuth call failed during login: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service unavailable",

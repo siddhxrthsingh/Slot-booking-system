@@ -1,40 +1,90 @@
 """
-Booking service: availability checks, create/cancel bookings, quota + policy enforcement.
+Booking service: availability checks, join/cancel bookings, quota + policy enforcement.
 
-Policy:
-  - All bookings auto-confirmed (no manual approval flow).
-  - 1 booking per sport per day per student.
-  - No time-clash: a student cannot hold two bookings at the same time.
-  - Cancellation must happen >= CANCEL_WINDOW_HOURS before slot start.
-  - Late cancellation (< window) → apply a BAN_DURATION_DAYS ban.
+Join policy (Phase 3 Step 1B):
+  - Facility capacity is authoritative; capacity check/increment is atomic.
+  - Multiple students may join the same slot (shared slots).
+  - First active participant becomes the leader (leader_user_id / is_leader).
+  - A user cannot hold two ACTIVE participations in the same slot.
+  - A user who left/cancelled a slot BEFORE the cancellation deadline may
+    rejoin it later (subject to normal eligibility). A user whose leave was
+    a LATE cancellation (within the deadline, triggering the ban) cannot
+    rejoin that same slot.
+  - Maximum 2 ACTIVE slots per calendar day per student, across all sports/facilities.
+  - Active bookings for the same student must not overlap in time.
   - Banned students cannot make new bookings until the ban expires.
+
+Cancellation/leave behavior is out of scope for this step and remains as before.
 """
-from datetime import datetime, timedelta, timezone
+import asyncio
+import logging
+from datetime import date as date_type, datetime, time, timedelta, timezone
 from typing import Literal
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.utils import IST, ensure_utc
+from pymongo.errors import DuplicateKeyError
+
 from app.config import get_settings
+from app.services.slot_generation_service import generate_slots_for_date
+from app.utils import IST
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _slot_date(slot: dict) -> datetime:
+    """slot['date'] is stored as a datetime, but a handful of pre-existing
+    documents have it as an ISO string (e.g. "2026-09-07T00:00:00.000Z").
+    Parse defensively rather than crashing the whole slots/metrics/bookings
+    listing on one malformed record."""
+    d = slot["date"]
+    if isinstance(d, str):
+        return datetime.fromisoformat(d.replace("Z", "+00:00"))
+    return d
+
+
 def _slot_start_dt(slot: dict) -> datetime:
-    """Combine slot['date'] (datetime) and slot['start_time'] (HH:MM) into UTC datetime."""
-    d: datetime = slot["date"]
+    """Combine slot['date'] (a calendar-day bucket) and slot['start_time']
+    (HH:MM) into the actual UTC instant it represents. RR campus operates
+    entirely in India, so start_time/end_time are always IST wall-clock
+    times — they must be localized to Asia/Kolkata (not treated as UTC)
+    before converting to UTC for comparison against a real UTC "now"."""
+    d = _slot_date(slot)
     h, m = map(int, slot["start_time"].split(":"))
-    return d.replace(hour=h, minute=m, second=0, microsecond=0, tzinfo=timezone.utc)
+    local = datetime(d.year, d.month, d.day, h, m, tzinfo=IST)
+    return local.astimezone(timezone.utc)
 
 
 def _slot_end_dt(slot: dict) -> datetime:
-    d: datetime = slot["date"]
+    """End of the slot. Prefers start_time + duration_minutes (supports arbitrary-duration
+    manual slots); falls back to end_time when duration_minutes is not set."""
+    duration = slot.get("duration_minutes")
+    if duration:
+        return _slot_start_dt(slot) + timedelta(minutes=duration)
+    d = _slot_date(slot)
     h, m = map(int, slot["end_time"].split(":"))
-    return d.replace(hour=h, minute=m, second=0, microsecond=0, tzinfo=timezone.utc)
+    local = datetime(d.year, d.month, d.day, h, m, tzinfo=IST)
+    return local.astimezone(timezone.utc)
+
+
+def _build_user_snapshot(user: dict) -> dict:
+    return {
+        "name": user.get("name"),
+        "srn": user.get("srn"),
+        "phone": user.get("phone"),
+        "branch": user.get("branch"),
+        "program": user.get("program"),
+        "semester": user.get("semester"),
+        "section": user.get("section"),
+        "campus": user.get("campus"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -71,47 +121,233 @@ async def apply_ban(db: AsyncIOMotorDatabase, user_oid: ObjectId, reason: str) -
 # Availability
 # ---------------------------------------------------------------------------
 
+def _as_utc(value: datetime) -> datetime:
+    """MongoDB always returns naive datetimes representing UTC instants
+    (tzinfo is stripped on write). Serializing that naive value straight to
+    JSON omits any offset/'Z' suffix, so a browser parses it as *local* time
+    instead of UTC — for an IST viewer that silently shifts the calendar day
+    backward by one. Mark it explicitly UTC before it reaches the client so
+    `date.toISOString()`-based day-bucket comparisons on the frontend stay
+    correct regardless of the viewer's timezone. Also tolerates the rare
+    pre-existing slot document where `date` was stored as an ISO string
+    instead of a datetime (see `_slot_date`)."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return ensure_utc(value)
+
+
+def serialize_student_slot(slot: dict) -> dict:
+    facility_id = slot.get("facility_id")
+    facility_name = slot.get("facility_name")
+    capacity = slot.get("capacity", 0)
+    booked_count = slot.get("booked_count", 0)
+    return {
+        "id": str(slot["_id"]),
+        "facility_id": str(facility_id) if facility_id else None,
+        "facility_name": facility_name,
+        "sport": slot["sport"],
+        "date": _as_utc(slot["date"]),
+        "start_time": slot["start_time"],
+        "end_time": slot["end_time"],
+        "venue": slot.get("venue") or facility_name or "",
+        "campus": slot["campus"],
+        "duration_minutes": slot.get("duration_minutes"),
+        "capacity": capacity,
+        "booked_count": booked_count,
+        "available_count": max(capacity - booked_count, 0),
+        "status": slot["status"],
+        "slot_type": slot.get("slot_type"),
+        "is_manual": slot.get("is_manual", False),
+        "requires_approval": slot.get("requires_approval", False),
+    }
+
+
+# In-flight generation tasks, keyed by (campus, slot_date.isoformat()). Lets
+# concurrent requests for the same campus/date share one generate_slots_for_date()
+# call instead of each kicking off a redundant full facility/template scan
+# (generation itself is already idempotent via $setOnInsert, so this is purely
+# a work-dedup, not a correctness requirement). Scoped to this process's
+# lifetime — lost on a Render restart, which is fine: the next request just
+# regenerates, and upsert semantics mean that can never create duplicates.
+_generation_tasks: dict[tuple[str, str], "asyncio.Task"] = {}
+
+
+def _get_or_start_generation_task(
+    db: AsyncIOMotorDatabase, slot_date: datetime, campus: str
+) -> "asyncio.Task":
+    key = (campus, slot_date.isoformat())
+    task = _generation_tasks.get(key)
+    if task is None or task.done():
+        task = asyncio.create_task(generate_slots_for_date(db, slot_date, campus=campus))
+        _generation_tasks[key] = task
+
+        def _log_if_failed(t: "asyncio.Task") -> None:
+            # Drop the finished task so the registry doesn't grow unbounded
+            # over the process's lifetime (one entry per distinct
+            # campus/date ever requested cold).
+            if _generation_tasks.get(key) is t:
+                _generation_tasks.pop(key, None)
+            # Nothing awaits a background-mode task directly, so an
+            # exception here would otherwise only surface as an "exception
+            # was never retrieved" warning. generate_slots_for_date already
+            # catches per-facility/per-period errors into its own summary,
+            # so this only fires on a genuinely unexpected failure.
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.exception(
+                    "Background slot generation failed for campus=%s date=%s",
+                    campus, slot_date, exc_info=exc,
+                )
+
+        task.add_done_callback(_log_if_failed)
+    return task
+
+
+async def ensure_slots_generated(
+    db: AsyncIOMotorDatabase,
+    slot_date: datetime,
+    campus: str = "RR",
+    background: bool = False,
+) -> dict | None:
+    """Idempotently make sure generated slots exist for a given campus/date.
+
+    `slot_date` must already be normalized to the UTC-midnight calendar-day
+    bucket convention used by the slot generator
+    (slot_generation_service.normalize_slot_date). Shared by both the
+    student-facing lazy-generation trigger (list_available_slots) and the
+    admin slot listing, so the admin Slots page never depends on a student
+    having opened the dashboard first.
+
+    Slot generation is idempotent (upsert with $setOnInsert), but running it
+    on every request re-scans all facilities/templates for no reason. Skip
+    the generation pass once generated slots already exist for this
+    campus/date; if none exist yet (or a race means none did a moment ago),
+    generation runs and safely no-ops on any doc created meanwhile.
+
+    `background=False` (the default — used by the admin slot listing) keeps
+    the original behavior exactly: this call awaits generation and returns
+    its summary, so admin's generation diagnostics stay accurate for the
+    request that actually triggered them.
+
+    `background=True` (used by the student-facing lazy-generation trigger)
+    takes expensive generation off the request's critical path: when slots
+    are missing, it starts (or reuses an already in-flight) generation task
+    and returns None immediately without waiting for it, so the student
+    request is never slowed down by generation. The student simply sees
+    today's not-yet-generated slots on this one request and gets them on
+    the next (generation normally completes well within a second, and the
+    frontend refetches often — on every websocket event and booking action).
+
+    Returns the generation summary (facilities_processed/errors/etc. from
+    generate_slots_for_date) when generation ran synchronously this call, or
+    None when it was skipped (slots already exist) or deferred to the
+    background. Callers that need generation failures to be diagnosable
+    (e.g. the admin slot listing) must call with background=False; the
+    return value is intentionally raw/internal and must never reach student
+    responses (it may contain exception type names).
+    """
+    already_generated = await db["slots"].find_one(
+        {
+            "campus": campus,
+            "date": slot_date,
+            "slot_type": "generated",
+        },
+        {"_id": 1},
+    )
+    if already_generated is not None:
+        return None
+
+    task = _get_or_start_generation_task(db, slot_date, campus)
+    if background:
+        return None
+    return await task
+
+
+async def wait_for_background_generation() -> None:
+    """Await every currently in-flight background-triggered generation task.
+
+    Not called by any request path — generation is intentionally fire-and-
+    forget for student requests (see `ensure_slots_generated(background=True)`).
+    This exists so tests (and any future ops tooling) can deterministically
+    wait for a just-triggered background generation to finish instead of
+    racing it.
+    """
+    pending = [t for t in _generation_tasks.values() if not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def list_available_slots(
     db: AsyncIOMotorDatabase,
     sport: str | None = None,
-    date: datetime | None = None,
+    date: date_type | None = None,
     campus: str | None = None,
     venue: str | None = None,
 ) -> list[dict]:
-    query: dict = {"status": "open"}
+    # `date` is a plain calendar date (no time/offset) — the caller (the
+    # student-facing router) requests it as an unambiguous "YYYY-MM-DD" key
+    # so the intended calendar day never depends on the client's timezone.
+    # It's normalized to the same UTC-midnight bucket convention used by the
+    # slot generator (slot_generation_service.normalize_slot_date).
+    slot_date = datetime.combine(date, time.min, tzinfo=timezone.utc) if date else None
+
+    if slot_date:
+        # Student-facing path: never block this request on generation — see
+        # ensure_slots_generated's `background` doc for the eventual-
+        # consistency tradeoff this makes.
+        await ensure_slots_generated(db, slot_date, campus=campus or "RR", background=True)
+
+    query: dict = {"status": {"$in": ["open", "full"]}}
     if sport:
         query["sport"] = {"$regex": sport, "$options": "i"}
     if campus:
         query["campus"] = campus
     if venue:
-        query["venue"] = {"$regex": venue, "$options": "i"}
-    if date:
-        start = date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end   = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        query["$or"] = [
+            {"venue": {"$regex": venue, "$options": "i"}},
+            {"facility_name": {"$regex": venue, "$options": "i"}},
+        ]
+    if slot_date:
+        start = slot_date
+        end   = slot_date.replace(hour=23, minute=59, second=59, microsecond=999999)
         query["date"] = {"$gte": start, "$lte": end}
 
-    slots = await db["slots"].find(query).sort("date", 1).to_list(length=200)
-    return slots
+    slots = await db["slots"].find(query).sort(
+        [("date", 1), ("sport", 1), ("start_time", 1), ("facility_name", 1)]
+    ).to_list(length=500)
+    now = datetime.now(timezone.utc)
+    return [s for s in slots if _slot_end_dt(s) >= now]
 
 
 # ---------------------------------------------------------------------------
-# Create booking
+# Join slot (create participation record)
 # ---------------------------------------------------------------------------
+
+MAX_ACTIVE_SLOTS_PER_DAY = 2
+
 
 async def create_booking(
     db: AsyncIOMotorDatabase,
-    user_id: str,
+    user: dict,
     slot_id: str,
     notes: str | None = None,
 ) -> dict:
+    """Join a slot as a participant.
+
+    `user` is the authenticated user document (must contain at least `_id`;
+    name/srn/phone/branch/program/semester/section/campus are used for the
+    historical user_snapshot).
+    """
     slot_oid = ObjectId(slot_id)
-    user_oid = ObjectId(user_id)
+    user_oid = ObjectId(str(user["_id"]))
     now      = datetime.now(timezone.utc)
 
     # ── Ban check ────────────────────────────────────────────────────────────
     ban = await check_user_ban(db, user_oid)
     if ban:
-        until = ban["banned_until"].strftime("%d %b %Y, %H:%M UTC")
+        until = ensure_utc(ban["banned_until"]).astimezone(IST).strftime("%d %b %Y, %H:%M IST")
         raise ValueError(f"Your booking access is suspended until {until}.")
 
     # ── Fetch slot ───────────────────────────────────────────────────────────
@@ -122,37 +358,46 @@ async def create_booking(
     slot_start = _slot_start_dt(slot)
     slot_end   = _slot_end_dt(slot)
 
-    # ── Duplicate check ──────────────────────────────────────────────────────
-    existing = await db["bookings"].find_one(
-        {"user_id": user_oid, "slot_id": slot_oid, "status": {"$ne": "cancelled"}}
-    )
-    if existing:
-        raise ValueError("You already have a booking for this slot.")
+    # ── Expired slots cannot be joined (backend is authoritative) ───────────
+    if slot_end <= now:
+        raise ValueError("This slot has already ended and can no longer be joined.")
 
-    # ── 1 booking per sport per day ──────────────────────────────────────────
+    # ── Duplicate active participation / rejoin-after-leaving check ─────────
+    # Only the most recent booking for this user+slot matters: an early
+    # (non-late) cancellation no longer permanently blocks rejoining, but a
+    # late cancellation that triggered the ban still does.
+    prior_cursor = db["bookings"].find({"user_id": user_oid, "slot_id": slot_oid}).sort("joined_at", -1)
+    prior_list = await prior_cursor.to_list(length=1)
+    prior = prior_list[0] if prior_list else None
+    if prior:
+        if prior["status"] != "cancelled":
+            raise ValueError("You have already joined this slot.")
+        if prior.get("late_cancel"):
+            raise ValueError("You have already left this slot and cannot rejoin it.")
+
+    # ── Maximum 2 ACTIVE slots per calendar day (all sports/facilities) ─────
     day_start = slot_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end   = slot_start.replace(hour=23, minute=59, second=59)
+    day_end   = slot_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     same_day_slots = await db["slots"].find(
-        {"sport": slot["sport"], "date": {"$gte": day_start, "$lte": day_end}}
-    ).to_list(length=100)
+        {"date": {"$gte": day_start, "$lte": day_end}}
+    ).to_list(length=500)
     same_day_slot_ids = [s["_id"] for s in same_day_slots]
 
-    same_day_booking = await db["bookings"].find_one({
+    active_same_day_count = await db["bookings"].find({
         "user_id": user_oid,
         "slot_id": {"$in": same_day_slot_ids},
-        "status":  {"$nin": ["cancelled"]},
-    })
-    if same_day_booking:
+        "status":  {"$ne": "cancelled"},
+    }).to_list(length=MAX_ACTIVE_SLOTS_PER_DAY + 1)
+    if len(active_same_day_count) >= MAX_ACTIVE_SLOTS_PER_DAY:
         raise ValueError(
-            f"You already have a {slot['sport']} booking on this day. "
-            "Only 1 booking per sport per day is allowed."
+            f"You already have {MAX_ACTIVE_SLOTS_PER_DAY} active bookings on this day. "
+            f"Maximum {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day is allowed."
         )
 
-    # ── Time-clash check ─────────────────────────────────────────────────────
-    # Find all non-cancelled bookings for this user, enrich with slot times
+    # ── Overlap check across all active bookings (any day/sport) ────────────
     active_bookings = await db["bookings"].find(
-        {"user_id": user_oid, "status": {"$nin": ["cancelled"]}}
+        {"user_id": user_oid, "status": {"$ne": "cancelled"}}
     ).to_list(length=200)
 
     for ab in active_bookings:
@@ -166,15 +411,22 @@ async def create_booking(
             raise ValueError(
                 f"Time clash with your existing {ab['sport']} booking "
                 f"({ab_slot['start_time']}–{ab_slot['end_time']}). "
-                "You cannot book two sports at the same time."
+                "You cannot hold overlapping bookings."
             )
+
+    # ── Facility capacity is authoritative ───────────────────────────────────
+    capacity = slot["capacity"]
+    if slot.get("facility_id"):
+        facility = await db["facilities"].find_one({"_id": ObjectId(str(slot["facility_id"]))})
+        if facility and facility.get("capacity") is not None:
+            capacity = facility["capacity"]
 
     # ── Atomic seat reservation ──────────────────────────────────────────────
     updated_slot = await db["slots"].find_one_and_update(
         {
             "_id":    slot_oid,
             "status": "open",
-            "$expr":  {"$lt": ["$booked_count", "$capacity"]},
+            "$expr":  {"$lt": ["$booked_count", capacity]},
         },
         {"$inc": {"booked_count": 1}},
         return_document=True,
@@ -182,24 +434,63 @@ async def create_booking(
     if not updated_slot:
         raise ValueError("Slot is full or no longer available.")
 
-    if updated_slot["booked_count"] >= updated_slot["capacity"]:
+    if updated_slot["booked_count"] >= capacity:
         await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "full"}})
 
-    # Auto-confirm all bookings
+    # ── Leader assignment: the request that atomically took booked_count from
+    # 0 → 1 is the first successful participant, so it becomes leader. Since
+    # the increment above is atomic and MongoDB serializes per-document
+    # updates, `booked_count == 1` can be true for exactly one caller across
+    # the whole system — no separate race-prone claim step is needed.
+    is_leader = updated_slot["booked_count"] == 1
+    if is_leader:
+        await db["slots"].update_one(
+            {"_id": slot_oid}, {"$set": {"leader_user_id": user_oid}}
+        )
+
+    # ── Create participation record ──────────────────────────────────────────
     booking_doc = {
         "user_id":      user_oid,
         "slot_id":      slot_oid,
+        "facility_id":  ObjectId(str(slot["facility_id"])) if slot.get("facility_id") else None,
         "sport":        slot["sport"],
         "status":       "confirmed",
         "booking_date": now,
+        "joined_at":    now,
         "cancelled_at": None,
+        "cancelled_by": None,
+        "is_leader":    is_leader,
+        "user_snapshot": _build_user_snapshot(user),
         "notes":        notes,
         "approved_by":  None,
         "created_at":   now,
         "updated_at":   now,
     }
 
-    result = await db["bookings"].insert_one(booking_doc)
+    try:
+        result = await db["bookings"].insert_one(booking_doc)
+    except DuplicateKeyError:
+        # A concurrent request for this same user+slot won the race and
+        # already inserted the booking (the pre-check above is not atomic
+        # with the insert). Roll back the seat this attempt reserved so
+        # booked_count reflects only the one surviving booking.
+        released_slot = await db["slots"].find_one_and_update(
+            {"_id": slot_oid, "booked_count": {"$gt": 0}},
+            {"$inc": {"booked_count": -1}},
+            return_document=True,
+        )
+        if released_slot and released_slot.get("status") == "full" and released_slot["booked_count"] < capacity:
+            await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "open"}})
+        if is_leader:
+            # The surviving booking belongs to this same user, so
+            # leader_user_id is still correct — just make sure that
+            # surviving record itself is flagged as leader.
+            await db["bookings"].update_one(
+                {"user_id": user_oid, "slot_id": slot_oid, "status": {"$ne": "cancelled"}},
+                {"$set": {"is_leader": True}},
+            )
+        raise ValueError("You have already joined this slot.")
+
     booking_doc["_id"] = result.inserted_id
     return booking_doc
 
@@ -219,22 +510,39 @@ async def get_user_bookings(
 
     bookings = await db["bookings"].find(query).sort("created_at", -1).to_list(length=200)
 
+    # Batch-load every referenced slot in one $in query instead of a
+    # per-booking find_one (N+1) — same lookup, same semantics.
+    slot_ids = list({b["slot_id"] for b in bookings})
+    slots_by_id: dict = {}
+    if slot_ids:
+        slot_docs = await db["slots"].find(
+            {"_id": {"$in": slot_ids}}
+        ).to_list(length=len(slot_ids))
+        slots_by_id = {s["_id"]: s for s in slot_docs}
+
+    now = datetime.now(timezone.utc)
     enriched = []
     for b in bookings:
-        slot = await db["slots"].find_one({"_id": b["slot_id"]})
+        slot = slots_by_id.get(b["slot_id"])
+        # A booking is "past" once its slot's end time has elapsed. A booking
+        # whose slot no longer exists can't be upcoming, so it's treated as
+        # past too — it only ever shows up in history.
+        is_past = (_slot_end_dt(slot) < now) if slot else True
         entry = {
             "id":           str(b["_id"]),
             "slot_id":      str(b["slot_id"]),
             "sport":        b["sport"],
             "status":       b["status"],
             "booking_date": b["booking_date"],
-            "cancelled_at": b.get("cancelled_at"),
+            "cancelled_at": ensure_utc(b.get("cancelled_at")),
             "notes":        b.get("notes"),
-            "created_at":   b["created_at"],
+            "created_at":   ensure_utc(b["created_at"]),
+            "is_leader":    b.get("is_leader", False),
+            "is_past":      is_past,
         }
         if slot:
             entry.update({
-                "slot_date":       slot.get("date"),
+                "slot_date":       _as_utc(slot["date"]) if slot.get("date") else None,
                 "slot_start_time": slot.get("start_time"),
                 "slot_end_time":   slot.get("end_time"),
                 "slot_venue":      slot.get("venue"),
@@ -246,16 +554,46 @@ async def get_user_bookings(
 
 
 # ---------------------------------------------------------------------------
-# Cancel booking
+# Cancel booking (leave a slot — per-participant, not a slot-wide cancellation)
 # ---------------------------------------------------------------------------
 
 async def cancel_booking(
     db: AsyncIOMotorDatabase,
     booking_id: str,
     user_id: str,
+    actor_id: str | None = None,
+    apply_late_ban: bool = True,
 ) -> dict:
+    """Leave/cancel a participation in a slot.
+
+    `user_id` identifies the booking's owner (used for the ownership lookup,
+    exactly as before — this is what keeps a student from cancelling anyone
+    else's booking). `actor_id` identifies who is performing the
+    cancellation and is recorded as `cancelled_by`; it defaults to `user_id`
+    for the normal self-cancel path (student leaving their own slot), so
+    that behavior is unchanged. Admin-initiated force-cancellation passes
+    the admin's id as `actor_id` while still supplying the booking owner's
+    id as `user_id`, reusing this exact same safe logic — atomic capacity
+    release, leader reassignment, and historical preservation — instead of
+    duplicating it.
+
+    `apply_late_ban` controls whether a late cancellation applies the
+    student's ban. It defaults to True (student self-cancel keeps its
+    existing behavior unchanged). Admin-initiated force-cancellation passes
+    False — the `late_cancel` flag is still computed and stored for history,
+    but no ban is created, since a ban is a punitive consequence of the
+    student's own choice to cancel late, not of an admin cancelling on
+    their behalf.
+
+    Only the leaving participant's booking record is affected — the shared
+    slot and other participants' bookings are untouched beyond the capacity
+    count and (if the leaver was leader) leader promotion. The booking record
+    is never deleted; it is preserved with status="cancelled" for history.
+    """
     booking_oid = ObjectId(booking_id)
     user_oid    = ObjectId(user_id)
+    actor_oid   = ObjectId(actor_id) if actor_id else user_oid
+    now         = datetime.now(timezone.utc)
 
     booking = await db["bookings"].find_one({"_id": booking_oid, "user_id": user_oid})
     if not booking:
@@ -264,37 +602,93 @@ async def cancel_booking(
         raise ValueError("Booking is already cancelled.")
 
     slot = await db["slots"].find_one({"_id": booking["slot_id"]})
-    now  = datetime.now(timezone.utc)
 
     late_cancel = False
     if slot:
         slot_start = _slot_start_dt(slot)
         hours_until = (slot_start - now).total_seconds() / 3600
-        if hours_until < settings.cancel_window_hours:
-            late_cancel = True
-            # Apply ban for late cancellation
-            await apply_ban(
-                db,
-                user_oid,
-                f"Late cancellation of {slot['sport']} slot on "
-                f"{slot_start.strftime('%d %b %Y %H:%M')} UTC.",
-            )
+        late_cancel = hours_until < settings.cancel_window_hours
 
-    # Release the seat
-    if slot:
-        await db["slots"].update_one(
-            {"_id": booking["slot_id"]},
-            {"$inc": {"booked_count": -1}, "$set": {"status": "open"}},
-        )
-
+    # ── Atomic, idempotent status transition ─────────────────────────────────
+    # Guarding on status != "cancelled" here (not just the earlier read) makes
+    # this safe against duplicate/concurrent cancellation requests for the
+    # same booking: only the caller that actually flips the status proceeds
+    # to apply the ban / decrement the slot / promote a new leader.
     updated = await db["bookings"].find_one_and_update(
-        {"_id": booking_oid},
+        {"_id": booking_oid, "user_id": user_oid, "status": {"$ne": "cancelled"}},
         {"$set": {
             "status":       "cancelled",
             "cancelled_at": now,
+            "cancelled_by": actor_oid,
             "updated_at":   now,
             "late_cancel":  late_cancel,
         }},
         return_document=True,
     )
+    if not updated:
+        raise ValueError("Booking is already cancelled.")
+
+    if late_cancel and slot and apply_late_ban:
+        slot_start = _slot_start_dt(slot)
+        await apply_ban(
+            db,
+            user_oid,
+            f"Late cancellation of {slot['sport']} slot on "
+            f"{slot_start.strftime('%d %b %Y %H:%M')} UTC.",
+        )
+
+    if slot:
+        # ── Atomic seat release, guarded against going negative ─────────────
+        released_slot = await db["slots"].find_one_and_update(
+            {"_id": slot["_id"], "booked_count": {"$gt": 0}},
+            {"$inc": {"booked_count": -1}},
+            return_document=True,
+        )
+        if released_slot:
+            capacity = released_slot.get("capacity")
+            if released_slot.get("facility_id"):
+                facility = await db["facilities"].find_one(
+                    {"_id": ObjectId(str(released_slot["facility_id"]))}
+                )
+                if facility and facility.get("capacity") is not None:
+                    capacity = facility["capacity"]
+            if released_slot.get("status") == "full" and released_slot["booked_count"] < capacity:
+                await db["slots"].update_one({"_id": slot["_id"]}, {"$set": {"status": "open"}})
+
+        # ── Leader promotion: earliest joined remaining active participant ──
+        # The promotion write is guarded by status != "cancelled" so a
+        # candidate who is concurrently leaving between selection and write
+        # can never be promoted. If that guard fails (candidate cancelled in
+        # the meantime), the remaining active participants are re-read and
+        # the next earliest candidate is tried, until one is promoted or none
+        # remain.
+        if updated.get("is_leader"):
+            new_leader_user_id = None
+            excluded_ids = set()
+            while True:
+                remaining = await db["bookings"].find({
+                    "slot_id": slot["_id"],
+                    "status": {"$ne": "cancelled"},
+                    "_id": {"$nin": list(excluded_ids)},
+                }).sort("joined_at", 1).to_list(length=1)
+                if not remaining:
+                    break
+
+                candidate = remaining[0]
+                promoted = await db["bookings"].find_one_and_update(
+                    {"_id": candidate["_id"], "status": {"$ne": "cancelled"}},
+                    {"$set": {"is_leader": True}},
+                    return_document=True,
+                )
+                if promoted:
+                    new_leader_user_id = promoted["user_id"]
+                    break
+
+                # Candidate was cancelled concurrently — exclude and retry.
+                excluded_ids.add(candidate["_id"])
+
+            await db["slots"].update_one(
+                {"_id": slot["_id"]}, {"$set": {"leader_user_id": new_leader_user_id}}
+            )
+
     return updated

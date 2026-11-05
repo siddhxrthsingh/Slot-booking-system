@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
@@ -8,9 +8,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.database import get_db
 from app.dependencies import require_admin
 from app.schemas.booking import ApprovalAction
+from app.schemas.schedule_template import ScheduleTemplateCreate, ScheduleTemplateUpdate
 from app.schemas.slot import SlotCreate
-from app.services import admin_service
-from app.utils import success_response
+from app.services import admin_service, booking_service
+from app.utils import ensure_utc, success_response
 from app.ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -24,29 +25,48 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 async def get_slots(
     campus: Literal["RR", "EC"] | None = Query(default=None),
     sport: str | None = Query(default=None),
+    include_inactive: bool = Query(default=False),
+    date: date_type | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    slots = await admin_service.list_all_slots(db, campus, sport)
-    result = [
-        {
+    paged = await admin_service.list_all_slots(
+        db, campus, sport, active_only=not include_inactive, date=date,
+        page=page, page_size=page_size,
+    )
+    result = []
+    for s in paged["items"]:
+        capacity = s.get("capacity", 0)
+        booked_count = s.get("booked_count", 0)
+        result.append({
             "id":                str(s["_id"]),
-            "sport":             s["sport"],
-            "date":              s["date"],
-            "start_time":        s["start_time"],
-            "end_time":          s["end_time"],
-            "venue":             s["venue"],
-            "campus":            s["campus"],
-            "capacity":          s["capacity"],
-            "booked_count":      s["booked_count"],
-            "available_count":   s["capacity"] - s["booked_count"],
-            "status":            s["status"],
+            "sport":             s.get("sport"),
+            "date":              ensure_utc(s.get("date")),
+            "start_time":        s.get("start_time"),
+            "end_time":          s.get("end_time"),
+            "venue":             s.get("venue") or s.get("facility_name"),
+            "campus":            s.get("campus"),
+            "capacity":          capacity,
+            "booked_count":      booked_count,
+            "available_count":   max(capacity - booked_count, 0),
+            "status":            s.get("status"),
             "requires_approval": s.get("requires_approval", False),
-            "created_at":        s.get("created_at"),
-        }
-        for s in slots
-    ]
-    return success_response(data=result, message="Slots fetched")
+            "created_at":        ensure_utc(s.get("created_at")),
+            "is_manual":         s.get("is_manual", False),
+            "facility_id":       str(s["facility_id"]) if s.get("facility_id") else None,
+        })
+    return success_response(
+        data={
+            "items": result,
+            "total": paged["total"],
+            "page": paged["page"],
+            "page_size": paged["page_size"],
+            "generation_diagnostics": paged.get("generation_diagnostics"),
+        },
+        message="Slots fetched",
+    )
 
 
 @router.post("/slots/create")
@@ -58,7 +78,12 @@ async def create_slot(
     slot_data = body.model_dump()
     # Force auto-confirm (no approval required)
     slot_data["requires_approval"] = False
-    slot = await admin_service.create_slot(db, slot_data, str(admin["_id"]))
+    try:
+        slot = await admin_service.create_slot(db, slot_data, str(admin["_id"]))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     await ws_manager.broadcast("slot_created", {
         "slot_id": str(slot["_id"]),
         "sport":   slot["sport"],
@@ -77,12 +102,29 @@ async def update_slot(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    for key in ("_id", "created_by", "created_at", "booked_count"):
-        updates.pop(key, None)
-
-    slot = await admin_service.update_slot(db, slot_id, updates)
-    if not slot:
+    existing = await db["slots"].find_one({"_id": ObjectId(slot_id)})
+    if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slot not found")
+
+    if existing.get("is_manual"):
+        # Validated, facility-authoritative edit flow (Phase 6.2) — generated
+        # slots never go through this branch, and this function itself also
+        # rejects a non-manual slot defensively.
+        for key in ("_id", "created_by", "created_at", "booked_count", "is_manual"):
+            updates.pop(key, None)
+        try:
+            slot = await admin_service.update_manual_slot(db, slot_id, updates)
+        except LookupError as e:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    else:
+        # Unchanged: generated slots keep their existing free-text edit path.
+        for key in ("_id", "created_by", "created_at", "booked_count"):
+            updates.pop(key, None)
+        slot = await admin_service.update_slot(db, slot_id, updates)
+        if not slot:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slot not found")
 
     await ws_manager.broadcast("slot_updated", {"slot_id": slot_id})
     return success_response(data={"slot_id": slot_id}, message="Slot updated")
@@ -94,11 +136,24 @@ async def cancel_slot(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    affected = await admin_service.cancel_slot(db, slot_id)
+    try:
+        affected = await admin_service.cancel_slot(db, slot_id, str(admin["_id"]))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     await ws_manager.broadcast("slot_cancelled", {
         "slot_id":           slot_id,
         "bookings_cancelled": affected,
     })
+
+    slot = await db["slots"].find_one({"_id": ObjectId(slot_id)})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
+
     return success_response(
         data={"slot_id": slot_id, "bookings_cancelled": affected},
         message="Slot cancelled and all associated bookings cancelled",
@@ -129,10 +184,14 @@ async def delete_slot_permanently(
 @router.get("/bookings")
 async def get_all_bookings(
     status_filter: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    bookings = await admin_service.list_all_bookings(db, status_filter)
+    bookings = await admin_service.list_all_bookings(
+        db, status_filter, page=page, page_size=page_size
+    )
     return success_response(data=bookings, message="Bookings fetched")
 
 
@@ -142,31 +201,40 @@ async def admin_cancel_booking(
     db: AsyncIOMotorDatabase = Depends(get_db),
     admin: dict = Depends(require_admin),
 ):
-    """Admin force-cancel any active booking and release the seat."""
-    from bson import ObjectId
-    from datetime import datetime, timezone
+    """Admin force-cancel any active booking.
 
-    now = datetime.now(timezone.utc)
+    Reuses booking_service.cancel_booking — the same atomic capacity
+    release, leader-reassignment, and historical-preservation logic used
+    for student self-cancellation — with the admin recorded as the
+    cancelling actor (cancelled_by) instead of the booking's owner.
+    """
     booking = await db["bookings"].find_one({"_id": ObjectId(booking_id)})
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    if booking["status"] == "cancelled":
-        raise HTTPException(status_code=400, detail="Booking is already cancelled")
 
-    # Release the seat
-    await db["slots"].update_one(
-        {"_id": booking["slot_id"]},
-        {"$inc": {"booked_count": -1}, "$set": {"status": "open"}},
-    )
-    updated = await db["bookings"].find_one_and_update(
-        {"_id": ObjectId(booking_id)},
-        {"$set": {"status": "cancelled", "cancelled_at": now, "updated_at": now,
-                  "admin_cancelled": True, "approved_by": ObjectId(str(admin["_id"]))}},
-        return_document=True,
-    )
+    try:
+        updated = await booking_service.cancel_booking(
+            db, booking_id, str(booking["user_id"]),
+            actor_id=str(admin["_id"]), apply_late_ban=False,
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     await ws_manager.broadcast("booking_cancelled", {"booking_id": booking_id, "sport": updated["sport"]})
+
+    slot = await db["slots"].find_one({"_id": updated["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
+
     return success_response(
-        data={"booking_id": booking_id, "status": "cancelled"},
+        data={"booking_id": booking_id, "status": updated["status"]},
         message="Booking cancelled by admin",
     )
 
@@ -230,9 +298,16 @@ async def list_bans(
     """List all active bans."""
     now = datetime.now(timezone.utc)
     bans = await db["bans"].find({"banned_until": {"$gt": now}}).to_list(length=200)
+    user_ids = list({b["user_id"] for b in bans})
+    users_by_id = {}
+    if user_ids:
+        users = await db["users"].find(
+            {"_id": {"$in": user_ids}}, {"password": 0}
+        ).to_list(length=len(user_ids))
+        users_by_id = {u["_id"]: u for u in users}
     result = []
     for b in bans:
-        user = await db["users"].find_one({"_id": b["user_id"]}, {"password": 0})
+        user = users_by_id.get(b["user_id"])
         result.append({
             "id":           str(b["_id"]),
             "user_id":      str(b["user_id"]),
@@ -257,6 +332,94 @@ async def unban_user(
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="No active ban found for this user")
     return success_response(data={"user_id": user_id}, message="Ban lifted")
+
+
+@router.get("/slots/{slot_id}/roster")
+async def get_slot_roster(
+    slot_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Admin-only: a slot's identity plus its full (active + historical)
+    participation roster, for occupancy/accountability purposes."""
+    try:
+        roster = await admin_service.get_slot_roster(db, slot_id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=roster, message="Slot roster fetched")
+
+
+@router.get("/facilities")
+async def get_facilities(
+    campus: Literal["RR"] = Query(default="RR"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Read-only facility inventory (RR only for now)."""
+    facilities = await admin_service.list_facilities(db, campus)
+    return success_response(data=facilities, message="Facilities fetched")
+
+
+@router.get("/schedule-templates")
+async def get_schedule_templates(
+    campus: Literal["RR"] = Query(default="RR"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    """Read-only schedule template viewer (RR only for now)."""
+    templates = await admin_service.list_schedule_templates(db, campus)
+    return success_response(data=templates, message="Schedule templates fetched")
+
+
+@router.post("/schedule-templates")
+async def create_schedule_template(
+    body: ScheduleTemplateCreate,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    try:
+        template = await admin_service.create_schedule_template(
+            db, body.model_dump(), str(admin["_id"])
+        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=template, message="Schedule template created")
+
+
+@router.patch("/schedule-templates/{template_id}")
+async def update_schedule_template(
+    template_id: str,
+    body: ScheduleTemplateUpdate,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    updates = body.model_dump(exclude_unset=True)
+    try:
+        template = await admin_service.update_schedule_template(db, template_id, updates)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data=template, message="Schedule template updated")
+
+
+@router.delete("/schedule-templates/{template_id}")
+async def delete_schedule_template(
+    template_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+    admin: dict = Depends(require_admin),
+):
+    try:
+        await admin_service.delete_schedule_template(db, template_id)
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return success_response(data={"template_id": template_id}, message="Schedule template deleted")
 
 
 @router.get("/users")

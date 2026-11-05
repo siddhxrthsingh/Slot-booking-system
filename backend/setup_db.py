@@ -12,29 +12,86 @@ async def main():
     client = AsyncIOMotorClient(settings.mongo_uri)
     db = client[settings.mongo_db_name]
 
-    print(f"Connected to: {settings.mongo_uri} / {settings.mongo_db_name}")
+    print(f"Connected to MongoDB database: {settings.mongo_db_name}")
 
     # Users
     await db["users"].create_index("srn", unique=True)
     await db["users"].create_index("email")
     print("  ✓ users indexes")
 
+    # Facilities
+    await db["facilities"].create_index([("campus", 1), ("sport", 1), ("sort_order", 1)])
+    # Facility identity (campus + sport + name) is relied on by seed_facilities.py
+    # for idempotent upserts — enforce it as unique to prevent duplicate facility
+    # documents from a bad upsert or manual insert.
+    await db["facilities"].create_index(
+        [("campus", 1), ("sport", 1), ("name", 1)], unique=True
+    )
+    print("  facilities indexes")
+
+    # Schedule templates
+    await db["schedule_templates"].create_index(
+        [("campus", 1), ("sport", 1), ("day_type", 1), ("is_active", 1)]
+    )
+    await db["schedule_templates"].create_index(
+        [("facility_id", 1), ("day_type", 1), ("is_active", 1)]
+    )
+    print("  schedule templates indexes")
+
     # Slots
     await db["slots"].create_index([("sport", 1), ("date", 1)])
     await db["slots"].create_index([("campus", 1), ("status", 1)])
     await db["slots"].create_index("date")
+    await db["slots"].create_index([("facility_id", 1), ("date", 1)])
+    await db["slots"].create_index([("facility_id", 1), ("date", 1), ("start_time", 1)])
+    await db["slots"].create_index([("campus", 1), ("sport", 1), ("date", 1)])
+    await db["slots"].create_index([("campus", 1), ("status", 1), ("date", 1)])
+    await db["slots"].create_index(
+        [
+            ("campus", 1),
+            ("facility_id", 1),
+            ("date", 1),
+            ("start_time", 1),
+            ("end_time", 1),
+            ("slot_type", 1),
+        ],
+        unique=True,
+        partialFilterExpression={
+            "slot_type": "generated",
+            "facility_id": {"$type": "objectId"},
+        },
+    )
     print("  ✓ slots indexes")
 
     # Bookings
+    # A user may have at most one ACTIVE (non-cancelled) booking document per
+    # slot at a time — this closes the concurrent-duplicate-join race at the
+    # database layer. Cancelled bookings are exempt so a user who left before
+    # the late-cancellation deadline can later rejoin the same slot with a
+    # new booking document, while all prior cancelled records are preserved.
+    await db["bookings"].create_index(
+        [("user_id", 1), ("slot_id", 1)],
+        unique=True,
+        partialFilterExpression={"status": {"$ne": "cancelled"}},
+    )
     await db["bookings"].create_index([("user_id", 1), ("status", 1)])
     await db["bookings"].create_index([("slot_id", 1), ("status", 1)])
     await db["bookings"].create_index("status")
+    await db["bookings"].create_index([("facility_id", 1), ("status", 1)])
     print("  ✓ bookings indexes")
 
     # Sessions
     await db["sessions"].create_index("refresh_token_hash", unique=True)
     await db["sessions"].create_index("expires_at", expireAfterSeconds=0)
     print("  ✓ sessions indexes (TTL on expires_at)")
+
+    # Bans
+    # check_user_ban() (hit on every join attempt) filters on
+    # {user_id, banned_until: {$gt: now}}; apply_ban()'s upsert and
+    # unban_user()'s delete both filter on {user_id} alone. A single
+    # compound index serves all three — bans had no index at all before.
+    await db["bans"].create_index([("user_id", 1), ("banned_until", 1)])
+    print("  ✓ bans indexes")
 
     client.close()
     print("\nAll indexes created successfully!")

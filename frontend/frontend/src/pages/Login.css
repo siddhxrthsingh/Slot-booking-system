@@ -8,14 +8,14 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: url('/images/football.jpg') center / cover no-repeat;
+  background: url('/images/pesu-campus.jpg') center / cover no-repeat;
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
 }
 
 .pesu-bg-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(240, 244, 255, 0.72);
+  background: rgba(250, 246, 239, 0.86);
   backdrop-filter: blur(2px);
   z-index: 0;
 }
@@ -38,18 +38,19 @@
   z-index: 1;
   width: 100%;
   max-width: 420px;
-  background: rgba(255, 255, 255, 0.97);
-  border-radius: 12px;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.07), 0 20px 48px rgba(0,0,0,0.14);
+  background: #ffffff;
+  border: 1px solid rgba(20, 20, 30, 0.09);
+  border-radius: 20px;
+  box-shadow: 0 20px 45px rgba(20, 20, 30, 0.08);
   padding: 44px 40px 36px;
 }
 
 .pesu-title {
   margin: 0 0 28px;
   font-size: 2rem;
-  font-weight: 400;
-  color: #1a1a2e;
-  letter-spacing: -0.3px;
+  font-weight: 700;
+  color: #17171f;
+  letter-spacing: -0.02em;
 }
 
 .pesu-field {
@@ -63,19 +64,19 @@
 .pesu-input {
   width: 100%;
   padding: 13px 16px;
-  border: 1px solid #cdd4e0;
-  border-radius: 8px;
+  border: 1px solid rgba(20, 20, 30, 0.14);
+  border-radius: 12px;
   font-size: 0.97rem;
-  color: #1a1a2e;
-  background: #fff;
+  color: #17171f;
+  background: #fdfbf8;
   outline: none;
   transition: border-color 0.18s, box-shadow 0.18s;
   box-sizing: border-box;
 }
 
 .pesu-input:focus {
-  border-color: #1a2f5e;
-  box-shadow: 0 0 0 3px rgba(26, 47, 94, 0.12);
+  border-color: #c23616;
+  box-shadow: 0 0 0 3px rgba(194, 54, 22, 0.12);
 }
 
 /* Hide the browser's built-in password reveal button (Edge / Chrome) */
@@ -103,7 +104,7 @@
   align-items: center;
   transition: color 0.15s;
 }
-.pesu-eye-btn:hover { color: #1a2f5e; }
+.pesu-eye-btn:hover { color: #c23616; }
 .pesu-password-wrap .pesu-input { padding-right: 44px; }
 
 .pesu-error-msg {
@@ -124,12 +125,12 @@
   width: 100%;
   padding: 14px;
   margin-top: 4px;
-  background: #1a2f5e;
+  background: #c23616;
   color: #fff;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 1rem;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
   letter-spacing: 0.02em;
   transition: background 0.18s, transform 0.1s;
@@ -138,7 +139,7 @@
   justify-content: center;
   min-height: 50px;
 }
-.pesu-signin-btn:hover:not(:disabled) { background: #243d78; }
+.pesu-signin-btn:hover:not(:disabled) { background: #a22c11; }
 .pesu-signin-btn:active:not(:disabled) { transform: scale(0.99); }
 .pesu-signin-btn:disabled { opacity: 0.7; cursor: not-allowed; }
 
@@ -155,7 +156,7 @@
 .pesu-hint {
   margin: 20px 0 0;
   font-size: 0.82rem;
-  color: #6b7280;
+  color: #6b6b78;
   text-align: center;
   line-height: 1.6;
 }
@@ -165,8 +166,8 @@
   z-index: 1;
   margin-top: 24px;
   font-size: 0.78rem;
-  color: #4b5563;
-  opacity: 0.85;
+  color: #6b6b78;
+  opacity: 0.9;
 }
 
 @media (max-width: 500px) {

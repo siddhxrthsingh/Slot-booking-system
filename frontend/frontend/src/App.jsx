@@ -19,6 +19,14 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute adminOnly>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>

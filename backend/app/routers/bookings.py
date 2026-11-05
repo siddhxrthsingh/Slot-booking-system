@@ -1,14 +1,14 @@
-from datetime import datetime, timezone
+from datetime import date as date_type, datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.booking import BookingCreate
 from app.services import booking_service, email_service
-from app.utils import success_response
+from app.utils import IST, ensure_utc, success_response
 from app.ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
@@ -17,42 +17,27 @@ router = APIRouter(prefix="/bookings", tags=["Bookings"])
 @router.get("/available")
 async def list_available_slots(
     sport:  str | None = Query(default=None),
-    date:   datetime | None = Query(default=None),
+    date:   date_type | None = Query(default=None),
     campus: Literal["RR", "EC"] | None = Query(default=None),
     venue:  str | None = Query(default=None),
     db:     AsyncIOMotorDatabase = Depends(get_db),
 ):
     slots = await booking_service.list_available_slots(db, sport, date, campus, venue)
-    result = [
-        {
-            "id":                str(s["_id"]),
-            "sport":             s["sport"],
-            "date":              s["date"],
-            "start_time":        s["start_time"],
-            "end_time":          s["end_time"],
-            "venue":             s["venue"],
-            "campus":            s["campus"],
-            "capacity":          s["capacity"],
-            "booked_count":      s["booked_count"],
-            "available_count":   s["capacity"] - s["booked_count"],
-            "status":            s["status"],
-            "requires_approval": s.get("requires_approval", False),
-        }
-        for s in slots
-    ]
+    result = [booking_service.serialize_student_slot(s) for s in slots]
     return success_response(data=result, message="Available slots fetched")
 
 
 @router.post("/create")
 async def create_booking(
-    body:         BookingCreate,
-    db:           AsyncIOMotorDatabase = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    body:             BookingCreate,
+    background_tasks: BackgroundTasks,
+    db:               AsyncIOMotorDatabase = Depends(get_db),
+    current_user:     dict = Depends(get_current_user),
 ):
     try:
         booking = await booking_service.create_booking(
             db,
-            user_id=str(current_user["_id"]),
+            user=current_user,
             slot_id=body.slot_id,
             notes=body.notes,
         )
@@ -70,8 +55,20 @@ async def create_booking(
 
     # Send confirmation email (best-effort)
     slot = await db["slots"].find_one({"_id": booking["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
     if slot and current_user.get("email"):
-        await email_service.send_booking_confirmation(
+        # Fire-and-forget: SMTP latency must never sit on the booking's
+        # critical path. email_service._send() already swallows delivery
+        # errors internally, so a failure here can never affect the
+        # already-confirmed booking.
+        background_tasks.add_task(
+            email_service.send_booking_confirmation,
             to_email   = current_user["email"],
             name       = current_user.get("name", current_user.get("srn", "Student")),
             sport      = booking["sport"],
@@ -87,6 +84,7 @@ async def create_booking(
             "status":     booking["status"],
             "sport":      booking["sport"],
             "slot_id":    str(booking["slot_id"]),
+            "is_leader":  booking.get("is_leader", False),
         },
         message="Booking confirmed successfully",
     )
@@ -114,7 +112,7 @@ async def my_ban_status(
     ban = await booking_service.check_user_ban(db, ObjectId(str(current_user["_id"])))
     if ban:
         return success_response(
-            data={"banned": True, "banned_until": ban["banned_until"], "reason": ban.get("reason")},
+            data={"banned": True, "banned_until": ensure_utc(ban["banned_until"]), "reason": ban.get("reason")},
             message="User is banned",
         )
     return success_response(data={"banned": False}, message="No active ban")
@@ -122,9 +120,10 @@ async def my_ban_status(
 
 @router.delete("/{booking_id}")
 async def cancel_booking(
-    booking_id:   str,
-    db:           AsyncIOMotorDatabase = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    booking_id:       str,
+    background_tasks: BackgroundTasks,
+    db:               AsyncIOMotorDatabase = Depends(get_db),
+    current_user:     dict = Depends(get_current_user),
 ):
     try:
         updated = await booking_service.cancel_booking(
@@ -143,16 +142,25 @@ async def cancel_booking(
 
     # Send cancellation email (best-effort)
     slot = await db["slots"].find_one({"_id": updated["slot_id"]})
+    if slot:
+        await ws_manager.broadcast_occupancy(str(slot["_id"]), {
+            "capacity":        slot["capacity"],
+            "booked_count":    slot["booked_count"],
+            "available_count": max(slot["capacity"] - slot["booked_count"], 0),
+            "status":          slot["status"],
+        })
     late = updated.get("late_cancel", False)
     banned_until_str = None
     if late and current_user.get("email"):
         from bson import ObjectId
         ban = await booking_service.check_user_ban(db, ObjectId(str(current_user["_id"])))
         if ban:
-            banned_until_str = ban["banned_until"].strftime("%d %b %Y, %H:%M UTC")
+            banned_until_str = ensure_utc(ban["banned_until"]).astimezone(IST).strftime("%d %b %Y, %H:%M IST")
 
     if slot and current_user.get("email"):
-        await email_service.send_booking_cancellation(
+        # Fire-and-forget, same rationale as the confirmation email above.
+        background_tasks.add_task(
+            email_service.send_booking_cancellation,
             to_email   = current_user["email"],
             name       = current_user.get("name", current_user.get("srn", "Student")),
             sport      = updated["sport"],

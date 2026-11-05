@@ -1,9 +1,13 @@
 import client from './client';
 
-export async function getAdminSlots({ campus, sport } = {}) {
-  const params = {};
+// Returns { items, total, page, page_size }. page_size defaults to the
+// backend's bounded max (200) so existing callers that just want "all slots
+// for this date" keep working without paging through results themselves.
+export async function getAdminSlots({ campus, sport, date, page = 1, page_size = 200 } = {}) {
+  const params = { page, page_size };
   if (campus) params.campus = campus;
   if (sport) params.sport = sport;
+  if (date) params.date = date;
   const { data } = await client.get('/admin/slots', { params });
   return data.data;
 }
@@ -33,8 +37,9 @@ export async function getPendingBookings() {
   return data.data;
 }
 
-export async function getAllBookings(status = null) {
-  const params = {};
+// Returns { items, total, page, page_size }.
+export async function getAllBookings(status = null, { page = 1, page_size = 200 } = {}) {
+  const params = { page, page_size };
   if (status) params.status = status;
   const { data } = await client.get('/admin/bookings', { params });
   return data.data;
@@ -69,5 +74,39 @@ export async function getAllUsers({ campus } = {}) {
   const params = {};
   if (campus) params.campus = campus;
   const { data } = await client.get('/admin/users', { params });
+  return data.data;
+}
+
+export async function getFacilities({ campus } = {}) {
+  const params = {};
+  if (campus) params.campus = campus;
+  const { data } = await client.get('/admin/facilities', { params });
+  return data.data;
+}
+
+export async function getSlotRoster(slotId) {
+  const { data } = await client.get(`/admin/slots/${slotId}/roster`);
+  return data.data;
+}
+
+export async function getScheduleTemplates({ campus } = {}) {
+  const params = {};
+  if (campus) params.campus = campus;
+  const { data } = await client.get('/admin/schedule-templates', { params });
+  return data.data;
+}
+
+export async function createScheduleTemplate(templateData) {
+  const { data } = await client.post('/admin/schedule-templates', templateData);
+  return data.data;
+}
+
+export async function updateScheduleTemplate(templateId, updates) {
+  const { data } = await client.patch(`/admin/schedule-templates/${templateId}`, updates);
+  return data.data;
+}
+
+export async function deleteScheduleTemplate(templateId) {
+  const { data } = await client.delete(`/admin/schedule-templates/${templateId}`);
   return data.data;
 }

@@ -1,3 +1,9 @@
+/* DM Sans + IBM Plex Mono — used only within the student dashboard's
+   ".sd-shell" scope (App.css) to match the v0 visual reference. Loaded via
+   Google Fonts (no new npm dependency); everything else keeps the default
+   Segoe UI stack below. */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
 :root {
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.5;

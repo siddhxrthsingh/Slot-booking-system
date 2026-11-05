@@ -45,3 +45,27 @@ async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
             detail="Admin privileges required",
         )
     return current_user
+
+
+async def get_ws_user(token: str, db) -> dict | None:
+    """Authenticate a WebSocket connection from a `token` query param.
+
+    Browsers cannot set an Authorization header on a WebSocket handshake, so
+    the access token is passed as a query parameter instead. Returns None on
+    any failure so the caller can close the socket without accepting it.
+    """
+    try:
+        payload = decode_access_token(token)
+    except HTTPException:
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    try:
+        user = await db["users"].find_one({"_id": ObjectId(user_id)})
+    except Exception:
+        return None
+    if not user:
+        return None
+    user["id"] = str(user["_id"])
+    return user
