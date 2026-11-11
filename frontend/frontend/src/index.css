@@ -59,6 +59,13 @@ input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   padding: 0 2px;
 }
 
+/* Admin dashboard inputs have a light background: solid black picker icons */
+.ad-input[type="date"]::-webkit-calendar-picker-indicator,
+.ad-input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: brightness(0) !important;
+  opacity: 1 !important;
+}
+
 #root {
   min-height: 100vh;
 }
