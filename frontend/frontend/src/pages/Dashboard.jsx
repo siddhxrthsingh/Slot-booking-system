@@ -849,9 +849,7 @@ export default function Dashboard() {
             <nav className="sd-nav-links">
               <a href="#discover">Discover</a>
               <a href="#my-bookings">My bookings</a>
-              <button type="button" onClick={() => showToast('For help with bookings, contact your sports coordinator.')}>
-                Help
-              </button>
+              <a href="#help">Help</a>
             </nav>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button
@@ -887,15 +885,7 @@ export default function Dashboard() {
                   <div className="sd-mobile-menu">
                     <a href="#discover" onClick={() => setMobileNavOpen(false)}>Discover</a>
                     <a href="#my-bookings" onClick={() => setMobileNavOpen(false)}>My bookings</a>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMobileNavOpen(false);
-                        showToast('For help with bookings, contact your sports coordinator.');
-                      }}
-                    >
-                      Help
-                    </button>
+                    <a href="#help" onClick={() => setMobileNavOpen(false)}>Help</a>
                   </div>
                 )}
               </div>
@@ -1194,6 +1184,23 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="sd-card sd-help" id="help">
+            <div className="sd-card-head">
+              <h3 className="sd-section-title" style={{ fontSize: '1.05rem' }}>Contact us</h3>
+            </div>
+            <p>
+              Have questions, encountered a bug, or have suggestions for improvement? Contact us at{' '}
+              <a className="sd-help-email" href="mailto:pesusports@gmail.com">pesusports@gmail.com</a>.
+              We're happy to hear your feedback and help resolve any issues you encounter while using PESU Sports.
+            </p>
+            <ul>
+              <li>Booking-related issues</li>
+              <li>Bugs or technical problems</li>
+              <li>Suggestions and feature improvements</li>
+              <li>General queries and assistance</li>
+            </ul>
           </div>
 
           <footer className="sd-footer">

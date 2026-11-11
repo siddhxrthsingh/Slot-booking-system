@@ -1403,6 +1403,38 @@
   color: var(--sd-muted);
 }
 
+.sd-help {
+  margin-top: 24px;
+  scroll-margin-top: 90px;
+}
+
+.sd-help p {
+  margin: 0 0 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.sd-help ul {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--sd-muted);
+}
+
+.sd-help-email {
+  color: var(--sd-accent);
+  background: var(--sd-accent-softer);
+  font-family: var(--sd-font-mono);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+  text-decoration: underline;
+  word-break: break-all;
+}
+
+.sd-help-email:hover {
+  background: var(--sd-accent-soft);
+}
+
 .sd-footer {
   margin-top: 40px;
   padding-top: 20px;
