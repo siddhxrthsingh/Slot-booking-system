@@ -8,7 +8,7 @@ IST = ZoneInfo("Asia/Kolkata")
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
 
-from app.services.booking_service import create_booking
+from app.services.booking_service import DAILY_LIMIT_MESSAGE, create_booking
 
 
 # ---------------------------------------------------------------------------
@@ -124,13 +124,17 @@ class FakeCollection:
         await asyncio.sleep(0)
         for keys in self.unique_keys:
             key_values = tuple(doc.get(k) for k in keys)
+            if keys == ("active_day_key",) and key_values[0] is None:
+                continue  # partial index: only docs that carry the field
             for existing in self.docs:
                 if existing.get("status") == "cancelled":
                     # Mirrors the real partial unique index, which only
                     # covers non-cancelled (active) bookings.
                     continue
                 if tuple(existing.get(k) for k in keys) == key_values:
-                    raise DuplicateKeyError("duplicate key")
+                    raise DuplicateKeyError(
+                        "E11000 duplicate key error index: " + "_".join(keys) + "_1"
+                    )
         doc.setdefault("_id", ObjectId())
         self.docs.append(doc)
         return type("Result", (), {"inserted_id": doc["_id"]})()
@@ -143,6 +147,9 @@ def _apply_update(doc, update):
         elif op == "$inc":
             for k, v in fields.items():
                 doc[k] = doc.get(k, 0) + v
+        elif op == "$unset":
+            for k in fields:
+                doc.pop(k, None)
         else:
             raise NotImplementedError(op)
 
@@ -151,7 +158,7 @@ class FakeDb:
     def __init__(self, slots=None, bookings=None, facilities=None, bans=None, users=None):
         self.collections = {
             "slots": FakeCollection(slots),
-            "bookings": FakeCollection(bookings, unique_keys=[("user_id", "slot_id")]),
+            "bookings": FakeCollection(bookings, unique_keys=[("user_id", "slot_id"), ("active_day_key",)]),
             "facilities": FakeCollection(facilities),
             "bans": FakeCollection(bans),
             "users": FakeCollection(users),
@@ -345,23 +352,21 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
         booking = await create_booking(db, user=user, slot_id=str(slot["_id"]))
         self.assertEqual(booking["status"], "confirmed")
 
-    async def test_daily_two_active_slot_limit_enforced(self):
+    async def test_daily_one_active_slot_limit_enforced(self):
         date = future_date()
         slot1 = make_slot(date=date, start_time="09:00", end_time="10:00", sport="Badminton")
         slot2 = make_slot(date=date, start_time="11:00", end_time="12:00", sport="Table Tennis")
-        slot3 = make_slot(date=date, start_time="14:00", end_time="15:00", sport="Squash")
         user = make_user()
         db = FakeDb(
-            slots=[slot1, slot2, slot3],
-            facilities=[make_facility(slot1, 6), make_facility(slot2, 6), make_facility(slot3, 6)],
+            slots=[slot1, slot2],
+            facilities=[make_facility(slot1, 4), make_facility(slot2, 4)],
         )
 
         await create_booking(db, user=user, slot_id=str(slot1["_id"]))
-        await create_booking(db, user=user, slot_id=str(slot2["_id"]))
 
         with self.assertRaises(ValueError) as ctx:
-            await create_booking(db, user=user, slot_id=str(slot3["_id"]))
-        self.assertIn("active bookings on this day", str(ctx.exception))
+            await create_booking(db, user=user, slot_id=str(slot2["_id"]))
+        self.assertEqual(str(ctx.exception), DAILY_LIMIT_MESSAGE)
 
     async def test_concurrent_duplicate_join_by_same_user_does_not_double_book(self):
         # Same user fires two join requests for the same slot at once (e.g. a
@@ -405,7 +410,9 @@ class JoinBookingTests(unittest.IsolatedAsyncioTestCase):
         await create_booking(db, user=user, slot_id=str(slot1["_id"]))
         with self.assertRaises(ValueError) as ctx:
             await create_booking(db, user=user, slot_id=str(slot2["_id"]))
-        self.assertIn("Time clash", str(ctx.exception))
+        # Under the one-slot-per-day pilot policy the day limit is hit before
+        # the (now redundant, kept as defence in depth) overlap check.
+        self.assertEqual(str(ctx.exception), DAILY_LIMIT_MESSAGE)
 
     async def test_expired_slot_cannot_be_joined(self):
         # Slot's date/end_time are in the past — the join path (not just

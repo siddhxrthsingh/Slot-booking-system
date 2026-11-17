@@ -39,7 +39,7 @@ Booking a court used to mean walking to the ground and writing your name in a re
 **Home: pick a day and a sport**
 ![Student home](docs/screenshots/02-student-home.png)
 
-**Join a shared slot (1/6 joined, Leader tag, Leave slot)**
+**Join a shared slot (1/4 joined, Leader tag, Leave slot)**
 ![Join a slot](docs/screenshots/03-join-a-slot.png)
 
 ### Admin console
@@ -94,15 +94,15 @@ Booking a court used to mean walking to the ground and writing your name in a re
 ### Facilities and capacity (RR campus)
 | Sport | Facilities | Capacity each |
 |-------|-----------|:-------------:|
-| Badminton | Courts 1 to 3 | 6 |
-| Table Tennis | Tables 1 to 3 | 6 |
-| Squash | Courts 1 and 2 | 6 |
+| Badminton | Courts 1 to 3 | 4 |
+| Table Tennis | Tables 1 to 3 | 4 |
+| Squash | Courts 1 and 2 | 4 |
 | Basketball | Courts 1 and 2 | 12 |
 | Volleyball | Court 1 | 12 |
 
 ### Booking rules (enforced on the backend)
 - **Shared slots.** Many students can join the same slot, up to its capacity. Capacity is checked and updated atomically, so two students tapping Join at the same moment can never overbook a slot.
-- **2 active slots per student per day,** across all sports and facilities.
+- **1 active slot per student per day,** across all sports and facilities (pilot policy).
 - **No overlapping slots** for the same student.
 - **Leader.** The first active participant is the leader. If the leader leaves, the earliest remaining participant takes over.
 - **No rejoining.** Once you leave a slot you cannot rejoin that same slot.

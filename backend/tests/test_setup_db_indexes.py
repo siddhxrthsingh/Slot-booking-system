@@ -111,6 +111,52 @@ class SetupDbIndexTests(unittest.TestCase):
         ]
         self.assertEqual(len(bans_calls), 1)
 
+    def test_active_day_index_unique_partial_and_no_ne_filters(self):
+        calls = self._run_main_and_collect_calls()
+        day = [c for c in calls if c[0] == "bookings" and c[1] == "active_day_key"]
+        self.assertEqual(len(day), 1)
+        self.assertTrue(day[0][2]["unique"])
+        self.assertEqual(
+            day[0][2]["partialFilterExpression"], {"active_day_key": {"$type": "string"}}
+        )
+        for _, _, kw in calls:
+            self.assertNotIn("$ne", str(kw.get("partialFilterExpression", {})))
+
+    def test_user_slot_index_uses_supported_filter(self):
+        calls = self._run_main_and_collect_calls()
+        us = [c for c in calls if c[1] == [("user_id", 1), ("slot_id", 1)]][0]
+        self.assertEqual(
+            us[2]["partialFilterExpression"],
+            {"status": {"$in": ["confirmed", "pending_approval"]}},
+        )
+
+    def test_old_server_falls_back_and_later_indexes_still_created(self):
+        from pymongo.errors import OperationFailure
+
+        calls = []
+
+        class Coll(_FakeCollection):
+            async def create_index(self, keys, **kw):
+                if "$in" in str(kw.get("partialFilterExpression", "")):
+                    raise OperationFailure("Expression not supported", code=67)
+                return await super().create_index(keys, **kw)
+
+        class Db(_FakeDb):
+            def __getitem__(self, name):
+                return Coll(name, self.calls)
+
+        class Client(_FakeClient):
+            def __init__(self, calls):
+                self._db = Db(calls)
+
+        with patch("motor.motor_asyncio.AsyncIOMotorClient", return_value=Client(calls)):
+            setup_db = importlib.import_module("setup_db")
+            importlib.reload(setup_db)
+            asyncio.run(setup_db.main())
+        fb = [c for c in calls if c[1] == [("user_id", 1), ("slot_id", 1)]]
+        self.assertEqual(fb[0][2]["partialFilterExpression"], {"status": {"$gt": "cancelled"}})
+        self.assertTrue(any(c[0] == "bans" for c in calls))
+
     def test_main_is_idempotent_when_rerun(self):
         # create_index is idempotent in real MongoDB; verify main() can be
         # invoked twice without raising (no duplicate/conflicting definitions

@@ -20,8 +20,8 @@ later see full occupancy and participant/accountability details.
 - Students JOIN a slot; they do not independently book an entire court.
 - Normal generated slots are exactly 1 hour. Faculty/admin manual overrides may have
   arbitrary duration.
-- Capacity: Badminton / Table Tennis / Squash = 6 per facility. Basketball / Volleyball = 12.
-- Max 2 ACTIVE joined slots per calendar day per student, across all sports/facilities.
+- Capacity: Badminton / Table Tennis / Squash = 4 per facility (pilot policy; was 6). Basketball / Volleyball = 12.
+- Max 1 ACTIVE joined slot per calendar day per student (pilot policy; was 2), across all sports/facilities.
 - No overlapping active slots for the same student.
 - First active participant is the accountable leader. If the leader leaves, the
   earliest-joined remaining active participant becomes leader. If no active participants
@@ -38,9 +38,9 @@ later see full occupancy and participant/accountability details.
 
 | Sport | Facility | Capacity |
 |---|---|---|
-| Badminton | Court 1 / 2 / 3 | 6 each |
-| Table Tennis | Table 1 / 2 / 3 | 6 each |
-| Squash | Court 1 / 2 | 6 each |
+| Badminton | Court 1 / 2 / 3 | 4 each |
+| Table Tennis | Table 1 / 2 / 3 | 4 each |
+| Squash | Court 1 / 2 | 4 each |
 | Basketball | Court 1 / 2 | 12 each |
 | Volleyball | Court 1 | 12 |
 
@@ -88,8 +88,8 @@ phone/semester/section — persist all of it for future admin accountability.
 | Multiple participants | No uniqueness constraint may prevent multiple users joining the same slot |
 | Occupancy | `slot.booked_count` = current ACTIVE participants only |
 | Leader | First active participant is leader; promotion to earliest remaining active participant on leader exit |
-| Capacity | 6 (Badminton/TT/Squash), 12 (Basketball/Volleyball) |
-| Daily limit | Max 2 active slots/day across ALL sports/facilities |
+| Capacity | 4 (Badminton/TT/Squash), 12 (Basketball/Volleyball) |
+| Daily limit | Max 1 active slot/day across ALL sports/facilities |
 | Overlap | No overlapping active slots for the same student |
 | Same-slot rejoin | Blocked once a student has left that slot |
 | Cancel before ban window | Frees quota; student may join a different slot |
@@ -159,7 +159,7 @@ WebSockets, deployment hardening, EC campus, deferred group/privacy features).
 - Do not revert to one-student-per-slot semantics.
 - Do not delete historical participation records on normal cancellation.
 - Do not allow `booked_count` above capacity or below zero.
-- Do not allow more than 2 active slots/day per student.
+- Do not allow more than 1 active slot/day per student.
 - Do not allow overlapping active slots.
 - Do not allow same-slot rejoin after leaving.
 - Do not let generation overwrite manual slots or booking state.

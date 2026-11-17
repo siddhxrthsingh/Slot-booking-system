@@ -66,7 +66,7 @@ const SPORT_IMAGES = {
 };
 const DEFAULT_FACILITY_IMAGE = '/images/pesu-campus.jpg';
 
-const MAX_ACTIVE_SLOTS_PER_DAY = 2; // mirrors the backend's locked daily-quota rule
+const MAX_ACTIVE_SLOTS_PER_DAY = 1; // mirrors the backend pilot policy (one slot per student per day)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmtStatus(s) {
@@ -1116,7 +1116,7 @@ export default function Dashboard() {
                 <div className="sd-note-box">
                   <span>ℹ️</span>
                   <span>
-                    You can join up to {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day. Leave a slot early if your plans change.
+                    Only one slot per student per day is allowed. Leave a slot early if your plans change.
                   </span>
                 </div>
               </div>

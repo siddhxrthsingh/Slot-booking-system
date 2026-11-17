@@ -10,7 +10,9 @@ Join policy (Phase 3 Step 1B):
     rejoin it later (subject to normal eligibility). A user whose leave was
     a LATE cancellation (within the deadline, triggering the ban) cannot
     rejoin that same slot.
-  - Maximum 2 ACTIVE slots per calendar day per student, across all sports/facilities.
+  - Maximum 1 ACTIVE slot per calendar day per student, across all sports/facilities
+    (pilot policy). Enforced atomically via a unique partial index on the
+    booking's `active_day_key` (user + day), which is $unset on cancellation.
   - Active bookings for the same student must not overlap in time.
   - Banned students cannot make new bookings until the ban expires.
 
@@ -325,7 +327,11 @@ async def list_available_slots(
 # Join slot (create participation record)
 # ---------------------------------------------------------------------------
 
-MAX_ACTIVE_SLOTS_PER_DAY = 2
+MAX_ACTIVE_SLOTS_PER_DAY = 1
+DAILY_LIMIT_MESSAGE = (
+    "You have already joined a slot for this day. "
+    "Only one slot per student per day is allowed."
+)
 
 
 async def create_booking(
@@ -375,7 +381,10 @@ async def create_booking(
         if prior.get("late_cancel"):
             raise ValueError("You have already left this slot and cannot rejoin it.")
 
-    # ── Maximum 2 ACTIVE slots per calendar day (all sports/facilities) ─────
+    # ── Maximum ONE ACTIVE slot per calendar day (all sports/facilities) ────
+    # Pre-check (also covers legacy bookings that predate `active_day_key`).
+    # The race between two simultaneous requests is closed by the unique
+    # partial index on `active_day_key` at insert time (see below).
     day_start = slot_start.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end   = slot_start.replace(hour=23, minute=59, second=59, microsecond=999999)
 
@@ -384,16 +393,16 @@ async def create_booking(
     ).to_list(length=500)
     same_day_slot_ids = [s["_id"] for s in same_day_slots]
 
-    active_same_day_count = await db["bookings"].find({
+    active_same_day = await db["bookings"].find({
         "user_id": user_oid,
         "slot_id": {"$in": same_day_slot_ids},
         "status":  {"$ne": "cancelled"},
-    }).to_list(length=MAX_ACTIVE_SLOTS_PER_DAY + 1)
-    if len(active_same_day_count) >= MAX_ACTIVE_SLOTS_PER_DAY:
-        raise ValueError(
-            f"You already have {MAX_ACTIVE_SLOTS_PER_DAY} active bookings on this day. "
-            f"Maximum {MAX_ACTIVE_SLOTS_PER_DAY} active slots per day is allowed."
-        )
+    }).to_list(length=MAX_ACTIVE_SLOTS_PER_DAY)
+    if len(active_same_day) >= MAX_ACTIVE_SLOTS_PER_DAY:
+        raise ValueError(DAILY_LIMIT_MESSAGE)
+
+    # Calendar-day key: same bucket the slot is stored in (slot["date"]).
+    active_day_key = f"{user_oid}:{_slot_date(slot).strftime('%Y-%m-%d')}"
 
     # ── Overlap check across all active bookings (any day/sport) ────────────
     active_bookings = await db["bookings"].find(
@@ -442,11 +451,9 @@ async def create_booking(
     # the increment above is atomic and MongoDB serializes per-document
     # updates, `booked_count == 1` can be true for exactly one caller across
     # the whole system — no separate race-prone claim step is needed.
+    # The slot's leader_user_id is only written AFTER the booking insert
+    # succeeds, so a rejected insert never leaves a wrong leader behind.
     is_leader = updated_slot["booked_count"] == 1
-    if is_leader:
-        await db["slots"].update_one(
-            {"_id": slot_oid}, {"$set": {"leader_user_id": user_oid}}
-        )
 
     # ── Create participation record ──────────────────────────────────────────
     booking_doc = {
@@ -460,6 +467,10 @@ async def create_booking(
         "cancelled_at": None,
         "cancelled_by": None,
         "is_leader":    is_leader,
+        # Unique (partial index) per user+calendar day while the booking is
+        # active; removed on cancellation. This is the atomic backstop for the
+        # one-slot-per-day rule.
+        "active_day_key": active_day_key,
         "user_snapshot": _build_user_snapshot(user),
         "notes":        notes,
         "approved_by":  None,
@@ -469,11 +480,12 @@ async def create_booking(
 
     try:
         result = await db["bookings"].insert_one(booking_doc)
-    except DuplicateKeyError:
-        # A concurrent request for this same user+slot won the race and
-        # already inserted the booking (the pre-check above is not atomic
-        # with the insert). Roll back the seat this attempt reserved so
-        # booked_count reflects only the one surviving booking.
+    except DuplicateKeyError as exc:
+        # A concurrent request won the race and already inserted a booking
+        # (the pre-checks above are not atomic with the insert). Either the
+        # same user+slot (unique user_id/slot_id index) or the same user+day
+        # (unique active_day_key index). Roll back the seat this attempt
+        # reserved so booked_count reflects only surviving bookings.
         released_slot = await db["slots"].find_one_and_update(
             {"_id": slot_oid, "booked_count": {"$gt": 0}},
             {"$inc": {"booked_count": -1}},
@@ -482,14 +494,26 @@ async def create_booking(
         if released_slot and released_slot.get("status") == "full" and released_slot["booked_count"] < capacity:
             await db["slots"].update_one({"_id": slot_oid}, {"$set": {"status": "open"}})
         if is_leader:
-            # The surviving booking belongs to this same user, so
-            # leader_user_id is still correct — just make sure that
-            # surviving record itself is flagged as leader.
-            await db["bookings"].update_one(
+            # Only if a surviving booking by this same user exists on this
+            # slot (same-slot race): it inherits leadership. A day-limit
+            # rejection on a different slot leaves no leader write behind.
+            survivor = await db["bookings"].find_one_and_update(
                 {"user_id": user_oid, "slot_id": slot_oid, "status": {"$ne": "cancelled"}},
                 {"$set": {"is_leader": True}},
+                return_document=True,
             )
+            if survivor:
+                await db["slots"].update_one(
+                    {"_id": slot_oid}, {"$set": {"leader_user_id": user_oid}}
+                )
+        if "active_day_key" in str(exc) and "user_id" not in str(exc):
+            raise ValueError(DAILY_LIMIT_MESSAGE)
         raise ValueError("You have already joined this slot.")
+
+    if is_leader:
+        await db["slots"].update_one(
+            {"_id": slot_oid}, {"$set": {"leader_user_id": user_oid}}
+        )
 
     booking_doc["_id"] = result.inserted_id
     return booking_doc
@@ -622,7 +646,10 @@ async def cancel_booking(
             "cancelled_by": actor_oid,
             "updated_at":   now,
             "late_cancel":  late_cancel,
-        }},
+        },
+        # Free this user's day-slot claim (cancelled bookings no longer count
+        # toward the one-slot-per-day rule; the ban still applies if late).
+        "$unset": {"active_day_key": ""}},
         return_document=True,
     )
     if not updated:

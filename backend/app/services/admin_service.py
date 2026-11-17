@@ -446,9 +446,13 @@ async def process_approval(
     if new_status == "cancelled":
         update["cancelled_at"] = now
 
+    update_op: dict = {"$set": update}
+    if new_status == "cancelled":
+        update_op["$unset"] = {"active_day_key": ""}
+
     updated = await db["bookings"].find_one_and_update(
         {"_id": ObjectId(booking_id), "status": "pending_approval"},
-        {"$set": update},
+        update_op,
         return_document=True,
     )
 

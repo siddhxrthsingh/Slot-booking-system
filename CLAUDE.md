@@ -110,19 +110,19 @@ These rules are authoritative. Do not change them unless explicitly instructed.
 
 Badminton:
 
-\- Capacity = 6 per court
+\- Capacity = 4 per court
 
 
 
 Table Tennis:
 
-\- Capacity = 6 per table
+\- Capacity = 4 per table
 
 
 
 Squash:
 
-\- Capacity = 6 per court
+\- Capacity = 4 per court
 
 
 
@@ -142,7 +142,7 @@ Volleyball:
 
 
 
-\- Maximum 2 ACTIVE joined slots per student per calendar day.
+\- Maximum 1 ACTIVE joined slot per student per calendar day (pilot policy).
 
 \- This limit applies across all sports and facilities.
 
@@ -288,29 +288,29 @@ There are exactly 11 initial RR facilities:
 
 \### Badminton
 
-\- Badminton Court 1 — capacity 6
+\- Badminton Court 1 — capacity 4
 
-\- Badminton Court 2 — capacity 6
+\- Badminton Court 2 — capacity 4
 
-\- Badminton Court 3 — capacity 6
+\- Badminton Court 3 — capacity 4
 
 
 
 \### Table Tennis
 
-\- Table Tennis Table 1 — capacity 6
+\- Table Tennis Table 1 — capacity 4
 
-\- Table Tennis Table 2 — capacity 6
+\- Table Tennis Table 2 — capacity 4
 
-\- Table Tennis Table 3 — capacity 6
+\- Table Tennis Table 3 — capacity 4
 
 
 
 \### Squash
 
-\- Squash Court 1 — capacity 6
+\- Squash Court 1 — capacity 4
 
-\- Squash Court 2 — capacity 6
+\- Squash Court 2 — capacity 4
 
 
 

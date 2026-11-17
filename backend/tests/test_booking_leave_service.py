@@ -198,22 +198,22 @@ class LeaveBookingTests(unittest.IsolatedAsyncioTestCase):
         )
         slot1 = make_slot(date=date, start_time="09:00", end_time="10:00", sport="Badminton")
         slot2 = make_slot(date=date, start_time="11:00", end_time="12:00", sport="Table Tennis")
-        slot3 = make_slot(date=date, start_time="14:00", end_time="15:00", sport="Squash")
         user = make_user()
         db = FakeDb(
-            slots=[slot1, slot2, slot3],
-            facilities=[make_facility(slot1, 6), make_facility(slot2, 6), make_facility(slot3, 6)],
+            slots=[slot1, slot2],
+            facilities=[make_facility(slot1, 4), make_facility(slot2, 4)],
         )
 
         b1 = await create_booking(db, user=user, slot_id=str(slot1["_id"]))
-        await create_booking(db, user=user, slot_id=str(slot2["_id"]))
+        with self.assertRaises(ValueError):
+            await create_booking(db, user=user, slot_id=str(slot2["_id"]))
 
         # Cancel the first booking (well before the window) to free up quota.
         await cancel_booking(db, str(b1["_id"]), str(user["_id"]))
 
-        # Should now be allowed to join a third slot on the same day.
-        booking3 = await create_booking(db, user=user, slot_id=str(slot3["_id"]))
-        self.assertEqual(booking3["status"], "confirmed")
+        # Daily quota (1) is free again: another slot on the same day is allowed.
+        booking2 = await create_booking(db, user=user, slot_id=str(slot2["_id"]))
+        self.assertEqual(booking2["status"], "confirmed")
 
     async def test_banned_user_cannot_join_another_slot(self):
         date = datetime.now(IST) + timedelta(minutes=30)

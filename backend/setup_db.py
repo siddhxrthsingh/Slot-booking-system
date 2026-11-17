@@ -4,10 +4,31 @@ Usage:  python setup_db.py
 """
 import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import OperationFailure
 from app.config import get_settings
+
+ACTIVE_BOOKING_STATUSES = ["confirmed", "pending_approval"]
+_FAILED_INDEXES: list[tuple[str, str]] = []
+# IndexOptionsConflict / IndexKeySpecsConflict: an index with these keys or
+# this name already exists with different options. We never drop it.
+_CONFLICT_CODES = {85, 86}
+
+
+def _is_index_conflict(exc: OperationFailure) -> bool:
+    return exc.code in _CONFLICT_CODES
+
+
+async def _ensure_index(collection, keys, **kwargs):
+    """Create an index; on failure record it and continue (never drops)."""
+    try:
+        await collection.create_index(keys, **kwargs)
+    except OperationFailure as exc:
+        _FAILED_INDEXES.append((f"{collection.name}{keys}", str(exc)))
+        print(f"  ! FAILED index on {collection.name} {keys}: {exc}")
 
 
 async def main():
+    _FAILED_INDEXES.clear()
     settings = get_settings()
     client = AsyncIOMotorClient(settings.mongo_uri)
     db = client[settings.mongo_db_name]
@@ -64,16 +85,45 @@ async def main():
     print("  ✓ slots indexes")
 
     # Bookings
-    # A user may have at most one ACTIVE (non-cancelled) booking document per
-    # slot at a time — this closes the concurrent-duplicate-join race at the
-    # database layer. Cancelled bookings are exempt so a user who left before
-    # the late-cancellation deadline can later rejoin the same slot with a
-    # new booking document, while all prior cancelled records are preserved.
-    await db["bookings"].create_index(
-        [("user_id", 1), ("slot_id", 1)],
+    # Index creation here is NON-DESTRUCTIVE: nothing is dropped, and a failure
+    # of one index is reported but does not stop the remaining indexes.
+    #
+    # 1) Pilot policy: ONE active booking per student per calendar day, across
+    #    all sports/facilities. `active_day_key` ("<user_id>:<YYYY-MM-DD>") is
+    #    set on join and $unset on cancellation, so this partial unique index
+    #    makes the rule atomic. Legacy bookings lack the field (excluded from
+    #    the index) and are covered by the service-layer pre-check.
+    #    Created FIRST so no earlier failure can prevent it.
+    await _ensure_index(
+        db["bookings"],
+        "active_day_key",
         unique=True,
-        partialFilterExpression={"status": {"$ne": "cancelled"}},
+        partialFilterExpression={"active_day_key": {"$type": "string"}},
     )
+    # 2) At most one ACTIVE booking document per user per slot. Partial filters
+    #    do NOT support $ne (the old definition here was rejected by MongoDB and
+    #    aborted setup). Statuses are confirmed | pending_approval | cancelled,
+    #    so "active" == the first two. `$in` in a partial filter needs
+    #    MongoDB >= 6.0; on older servers fall back to `$gt: "cancelled"`,
+    #    which is supported everywhere and selects exactly those two values.
+    #    Cancelled bookings stay exempt so early-cancel + rejoin still works
+    #    and cancelled history is preserved.
+    try:
+        await db["bookings"].create_index(
+            [("user_id", 1), ("slot_id", 1)],
+            unique=True,
+            partialFilterExpression={"status": {"$in": ACTIVE_BOOKING_STATUSES}},
+        )
+    except OperationFailure as exc:
+        if _is_index_conflict(exc):
+            _FAILED_INDEXES.append(("bookings(user_id,slot_id)", str(exc)))
+        else:
+            await _ensure_index(
+                db["bookings"],
+                [("user_id", 1), ("slot_id", 1)],
+                unique=True,
+                partialFilterExpression={"status": {"$gt": "cancelled"}},
+            )
     await db["bookings"].create_index([("user_id", 1), ("status", 1)])
     await db["bookings"].create_index([("slot_id", 1), ("status", 1)])
     await db["bookings"].create_index("status")
